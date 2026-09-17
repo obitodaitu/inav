@@ -2,6 +2,7 @@
 .vagrant/
 .vscode/
 /build/
+/build_SITL/
 /obj/
 /tools/
 /downloads/

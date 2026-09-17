@@ -1,0 +1,70 @@
+# INAV SITL runtime image.
+#
+# Separate from the top-level Dockerfile, which is the *firmware* build
+# environment (inav-build). This one builds the host SITL binary and ships a
+# small runtime image you can point at a simulator.
+#
+#   docker build -f Dockerfile.sitl -t inav-sitl:9.1 .
+#   docker run --rm -it --network host inav-sitl:9.1 \
+#       --sim=ue --simip=<HOST_IP> --simport=49000
+#
+# On WSL2 --network host makes the container share the WSL2 netns, so the
+# Windows host is reachable at the default gateway; entrypoint.sh fills
+# --simip in from there when it is not given.
+
+# ---------- builder ----------
+FROM ubuntu:22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        cmake \
+        g++ \
+        gcc \
+        git \
+        ninja-build \
+        python3 \
+        python3-yaml \
+        ruby \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+# cmake/GetGitRevisionDescription.cmake wants a revision; without a .git the
+# version string degrades to "GITDIR-N" (the real one is dockerignored). So
+# synthesize a repository from the build context.
+RUN git init -q . \
+    && git config user.email "sitl@inav.invalid" \
+    && git config user.name "inav sitl build" \
+    && git add -A \
+    && git commit -q -m "INAV SITL build context" \
+    && cmake -S . -B build_SITL -GNinja -DSITL=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    && ninja -C build_SITL
+
+# ---------- runtime ----------
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        iproute2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 inav \
+    && mkdir -p /data \
+    && chown inav:inav /data
+
+COPY --from=builder /src/build_SITL/inav_*_SITL /opt/inav/
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+USER inav
+WORKDIR /data
+
+# 5760-5767: MSP/UART TCP sockets (Configurator), 49000/udp: simulator link
+EXPOSE 5760-5767/tcp
+EXPOSE 49000/udp
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

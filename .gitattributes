@@ -11,3 +11,4 @@ Makefile text
 *.bat eol=crlf
 *.txt text
 *.sh text eol=lf
+Dockerfile* text eol=lf
