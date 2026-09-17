@@ -21,6 +21,8 @@ main_sources(SITL_SRC
     target/SITL/sim/simHelper.h
     target/SITL/sim/soap_client.c
     target/SITL/sim/soap_client.h
+    target/SITL/sim/ue.c
+    target/SITL/sim/ue.h
     target/SITL/sim/xplane.c
     target/SITL/sim/xplane.h
 )

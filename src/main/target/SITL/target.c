@@ -56,6 +56,7 @@
 #include "build/version.h"
 
 #include "target/SITL/sim/realFlight.h"
+#include "target/SITL/sim/ue.h"
 #include "target/SITL/sim/xplane.h"
 
 #include "target/SITL/serial_proxy.h"
@@ -87,6 +88,8 @@ static void cleanupAndExit(int code, bool shouldExit) {
         simXPlaneClose();
     } else if (sitlSim == SITL_SIM_REALFLIGHT) {
         simRealFlightClose();
+    } else if (sitlSim == SITL_SIM_UE) {
+        simUeClose();
     }
     pthread_mutex_destroy(&mainLoopLock);
 
@@ -154,6 +157,18 @@ void systemInit(void) {
                 fprintf(stderr, "[SIM] Connection with X-Plane successfully established.\n");
             } else {
                 fprintf(stderr, "[SIM] Connection with X-PLane NOT established.\n");
+            }
+            break;
+        case SITL_SIM_UE:
+            if (mappingCount > UE_MAX_PWM_OUTS) {
+                fprintf(stderr, "[SIM] Mapping error. UE supports a maximum of %i PWM outputs.", UE_MAX_PWM_OUTS);
+                sitlSim = SITL_SIM_NONE;
+                break;
+            }
+            if (simUeInit(simIp, simPort, pwmMapping, mappingCount, useImu)) {
+                fprintf(stderr, "[SIM] Connection with UE simulator successfully established.\n");
+            } else {
+                fprintf(stderr, "[SIM] Connection with UE simulator NOT established.\n");
             }
             break;
         default:
@@ -226,7 +241,7 @@ void printCmdLineOptions(void)
     printVersion();
     fprintf(stderr, "Avaiable options:\n");
     fprintf(stderr, "--path=[path]                  Path and filename of eeprom.bin. If not specified 'eeprom.bin' in program directory is used.\n");
-    fprintf(stderr, "--sim=[rf|xp]                  Simulator interface: rf = RealFligt, xp = XPlane. Example: --sim=rf\n");
+    fprintf(stderr, "--sim=[rf|xp|ue]               Simulator interface: rf = RealFligt, xp = XPlane, ue = Unreal Engine. Example: --sim=rf\n");
     fprintf(stderr, "--simip=[ip]                   IP-Address oft the simulator host. If not specified localhost (127.0.0.1) is used.\n");
     fprintf(stderr, "--simport=[port]               Port oft the simulator host.\n");
     fprintf(stderr, "--useimu                       Use IMU sensor data from the simulator instead of using attitude data from the simulator directly (experimental, not recommended).\n");
@@ -281,6 +296,8 @@ void parseArguments(int argc, char *argv[])
                     sitlSim = SITL_SIM_REALFLIGHT;
                 } else if (strcmp(optarg, "xp") == 0){
                     sitlSim = SITL_SIM_XPLANE;
+                } else if (strcmp(optarg, "ue") == 0){
+                    sitlSim = SITL_SIM_UE;
                 } else {
                     fprintf(stderr, "[SIM] Unsupported simulator %s.\n", optarg);
                 }
