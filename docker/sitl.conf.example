@@ -1,0 +1,102 @@
+# Fleet configuration for launch_sitl.sh.
+#
+# The script sources ./sitl.conf when it exists (override with SITL_CONF=path),
+# so this is an ordinary shell file -- no quoting needed unless a value has
+# spaces. Command-line flags override anything set here, and this file in turn
+# overrides an exported variable of the same name.
+#
+# Copy it to sitl.conf and edit the two required values.
+
+# ---------------------------------------------------------------------------
+# REQUIRED
+# ---------------------------------------------------------------------------
+
+# The machine running the simulator, i.e. the Unreal editor. This is the one
+# thing the image cannot carry, because it is a property of your network.
+#
+# On a plain Linux host there is no safe default. entrypoint.sh could only
+# guess, and the only thing it could guess is the default gateway -- a router.
+# Packets sent there are not rejected, they are simply never answered, so the
+# failure looks like a slow simulator until the handshake times out ten
+# seconds later. Rather than do that, the entrypoint refuses to guess.
+#
+# WSL2: leave this empty and the container falls back to its default gateway,
+# which under WSL2 NAT *is* the Windows host -- but only because the script
+# runs the container with --network host. Under the default bridge that
+# gateway is the docker bridge, which reaches the WSL VM and not the Windows
+# machine the editor is on. Anywhere other than WSL the fallback is refused.
+SIM_IP=192.168.1.50
+
+# Which aircraft to start, by VehicleIndex. This is the same number as
+# UInavSimBridge.VehicleIndex on the pawn, and every port is derived from it:
+# udp/(49000 + index) for the simulator link, tcp/(5760 + 10*index) for MSP.
+# Nothing converts between the two sides, which is the point -- one number
+# decides which aircraft a container talks to.
+#
+# It has to match the port table the plugin prints when the level comes up:
+#   LogInavSim: INAV Sim: 4 vehicles -- 1:udp/49000 ... 4:udp/49003
+# Starting an index the table does not list leaves that container talking to
+# nobody; starting the same index twice puts two containers on one port.
+INDICES=0,1,2,3
+
+# ---------------------------------------------------------------------------
+# OPTIONAL -- defaults shown, uncomment to change
+# ---------------------------------------------------------------------------
+
+# IMAGE=inav-sitl:9.1
+# IMAGE_TAR=inav-sitl-9.1.tar.gz   # loaded automatically when IMAGE is absent
+# SIM_BASE_PORT=49000              # must equal InavSimSettings > BaseListenPort
+# TCP_BASE_PORT=5760               # MSP; each vehicle strides by 10
+# CHANMAP=M01-01,M02-02,M03-03,M04-04
+
+# Where the RC sticks come from. Two eeproms ship in the image and they differ
+# in exactly one field, receiver_type:
+#
+#   sim (default)  the simulator's inav_ue/rc/channel[*] datarefs, i.e. the
+#                  pawn's SetRcChannel. A pilot in the editor.
+#   msp            MSP_SET_RAW_RC from a client on tcp/(TCP_BASE_PORT + 10*index).
+#                  An algorithm.
+#
+# Neither one changes the physics or the sensors: the simulator link stays up
+# either way, and the aircraft is still flown in Unreal. This selects the
+# source of the sticks, nothing else.
+#
+# Both eeproms are baked into the image, so neither choice needs a file from
+# the host. If you are running docker by hand rather than through this script,
+# the same switch is -e RECEIVER=msp -- or -e SIM=msp, which the entrypoint
+# translates to the same thing (it cannot be passed to --sim: target.c accepts
+# only rf|xp|ue, and anything else leaves the flight controller with no
+# simulator link at all).
+#
+# Note that SIM and RECEIVER are not alternatives -- they answer different
+# questions and both are needed. SIM picks the simulator *backend* (rf|xp|ue),
+# i.e. which datarefs get subscribed and where the sensors and motor outputs
+# go. RECEIVER picks who reads the sticks. SIM=xp RECEIVER=msp is a sensible
+# pairing, which is why this cannot be one variable.
+#
+# If you fly it over MSP, the client has to keep sending. The MSP receiver
+# times out after 200 ms of silence, which failsafes the aircraft -- 50 Hz is
+# a comfortable rate. See docker/msp_rc_client.py.
+# RECEIVER=msp
+
+# Each container sends subscription packets to SIM_IP and then listens on
+# udp/(SIM_BASE_PORT + index) for the replies, so the simulator's firewall
+# needs an inbound rule for that range -- on Windows, 49000-49007/udp.
+#
+# The MSP ports are the other direction and a real bind, on the machine
+# running the containers. Under --network host those are host ports, so if
+# something else already holds tcp/5760, move TCP_BASE_PORT.
+
+# Per-vehicle eeprom persistence. Unset by default: every vehicle boots from
+# the configured eeprom baked into the image and keeps any changes in the
+# container's own writable layer. That makes a rerun of the script a reset to
+# a known-good state, and leaves nothing on the host that can break it.
+#
+# Set it to keep a CLI `save` across container replacement. The directory
+# has to be writable by uid 1000 *inside* the container -- the script checks
+# and prints the chown if it is not.
+# DATA_ROOT=/srv/sitl-data
+
+# On WSL the daemon usually needs sudo; on a server the operator is normally
+# in the docker group and it does not.
+# DOCKER=sudo\ docker

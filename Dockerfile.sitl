@@ -8,9 +8,22 @@
 #   docker run --rm -it --network host inav-sitl:9.1 \
 #       --sim=ue --simip=<HOST_IP> --simport=49000
 #
+# The image is self-contained: it carries the SITL binary, a *configured*
+# eeprom to boot from, and the launcher that drives a whole fleet. The one
+# thing it cannot carry is where the simulator is, so --simip (and which
+# vehicles to start) is what the operator supplies -- see sitl.conf.example.
+#
+# entrypoint.sh seeds /data/eeprom.bin from eeprom.default.bin when it is
+# missing. That default matters more than it looks: without it the SITL
+# creates an all-zero eeprom, boots on factory defaults whose receiver_type
+# is NONE, and then sits on ARMING_DISABLED_RC_LINK forever while the
+# simulator link reports itself perfectly healthy.
+#
 # On WSL2 --network host makes the container share the WSL2 netns, so the
-# Windows host is reachable at the default gateway; entrypoint.sh fills
-# --simip in from there when it is not given.
+# Windows host is reachable at the default gateway and entrypoint.sh can
+# still fill --simip in from there. On any other host that gateway is a
+# router, not the simulator, so the fallback is refused instead of quietly
+# black-holing every subscription.
 
 # ---------- builder ----------
 FROM ubuntu:22.04 AS builder
@@ -58,7 +71,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /src/build_SITL/inav_*_SITL /opt/inav/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY docker/eeprom.default.bin /opt/inav/eeprom.default.bin
+COPY docker/eeprom.msp.bin /opt/inav/eeprom.msp.bin
+COPY docker/launch_sitl.sh /opt/inav/launch_sitl.sh
+COPY docker/sitl.conf.example /opt/inav/sitl.conf.example
+
+# Both eeproms stay root-owned and read-only on purpose: they are only ever the
+# *source* of a copy, never the live eeprom. The firmware opens the eeprom "r+",
+# and a read-only eeprom is not a degraded mode -- the failed open is not
+# checked before the fwrite, so it is a SIGSEGV with no ports bound.
+#
+# But cp() creates the destination with the *source's* mode, which makes this
+# 0444 a live grenade: the seeded /data/eeprom.bin comes out read-only too and
+# hangs the firmware on the very first boot. entrypoint.sh chmods the copy
+# back. If you ever change how that copy is made, keep the chmod.
+#
+# eeprom.msp.bin is the same config with receiver_type = MSP instead of SIM, so
+# the RC comes from an MSP client on the TCP port rather than from the
+# simulator's datarefs. Nothing else differs; see make_msp_eeprom.py, which
+# derives it and checks the checksum it has to recompute.
+#
+# Which of the two gets seeded is chosen at run time by RECEIVER=sim|msp (or
+# SIM=msp, which entrypoint.sh translates to the same thing). Both files are
+# baked in precisely so neither choice needs a file from the host.
+#
+# Explicit modes rather than +x because building from the Windows tree mounts
+# the context through 9p, which reports every file as 777 -- so the image
+# differs depending on which tree you built it from unless it is pinned here.
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /opt/inav/launch_sitl.sh \
+    && chmod 0644 /opt/inav/sitl.conf.example \
+    && chmod 0444 /opt/inav/eeprom.default.bin /opt/inav/eeprom.msp.bin
 
 USER inav
 WORKDIR /data

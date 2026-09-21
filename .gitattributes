@@ -6,6 +6,8 @@
 *.s text
 *.hex -crlf -diff
 *.elf -crlf -diff
+docker/eeprom.default.bin -crlf -diff
+docker/eeprom.msp.bin -crlf -diff
 *.ld text
 Makefile text
 *.bat eol=crlf
