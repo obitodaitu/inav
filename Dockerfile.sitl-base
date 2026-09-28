@@ -1,0 +1,66 @@
+# Pre-baked base images for the INAV SITL runtime (Dockerfile.sitl).
+#
+# Why this exists
+# ---------------
+# Dockerfile.sitl needs only two things from the network: the ubuntu:22.04 base
+# and a handful of apt packages. An air-gapped CI has neither. This Dockerfile
+# resolves that by baking those packages into images that are built once where
+# the internet is reachable, then pushed into the internal registry.
+# Dockerfile.sitl consumes them via BUILDER_BASE_IMAGE / RUNTIME_BASE_IMAGE and
+# consequently makes no apt call at all.
+#
+# Two targets, deliberately not one:
+#
+#   builder-base   ubuntu + the build toolchain (cmake/g++/ninja/...). Large,
+#                  used only by the builder stage, thrown away afterwards.
+#   runtime-base   ubuntu + ca-certificates + iproute2. Tiny, used by the
+#                  runtime stage, so the shipped inav-sitl stays lean.
+#
+# Sharing one fat base across both stages would drag the whole toolchain into
+# the final image (135MB -> ~730MB). Hence the split.
+#
+# Build and publish (online side):
+#
+#   docker build -f Dockerfile.sitl-base --target builder-base \
+#       -t inav-sitl-builder-base:22.04 .
+#   docker build -f Dockerfile.sitl-base --target runtime-base \
+#       -t inav-sitl-runtime-base:22.04 .
+#   docker tag inav-sitl-builder-base:22.04 <registry>/inav-sitl-builder-base:22.04
+#   docker tag inav-sitl-runtime-base:22.04 <registry>/inav-sitl-runtime-base:22.04
+#   docker push <registry>/inav-sitl-builder-base:22.04
+#   docker push <registry>/inav-sitl-runtime-base:22.04
+#
+# BASE_SOURCE lets the upstream base itself be a mirrored tag.
+#
+# docker/build_sitl_image.sh base wraps both builds.
+
+ARG BASE_SOURCE=ubuntu:22.04
+
+# ---------- builder-base: toolchain used by the builder stage ----------
+FROM ${BASE_SOURCE} AS builder-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        cmake \
+        g++ \
+        gcc \
+        git \
+        ninja-build \
+        python3 \
+        python3-yaml \
+        ruby \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------- runtime-base: only what the runtime stage needs ----------
+FROM ${BASE_SOURCE} AS runtime-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# iproute2 is not optional: entrypoint.sh reads `ip route show default` to fill
+# --simip in on WSL, and a container without `ip` degrades that fallback.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        iproute2 \
+    && rm -rf /var/lib/apt/lists/*

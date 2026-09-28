@@ -50,3 +50,10 @@ tokens.yaml
 # Local development files
 .semgrepignore
 build_sitl/
+
+# unit test / report artifacts (scripts/run_unit_tests_report.sh)
+# test-reports/unit/summary.json is the pipeline artifact the daily check reads.
+/test-reports/
+
+# CI build output (scripts/ci/02_compile.sh -> scripts/ci/03_build_image.sh)
+/dist/

@@ -1,0 +1,76 @@
+# INAV SITL runtime image -- packaging only.
+#
+# Same runtime image as Dockerfile.sitl, but it does NOT compile: it packages
+# the binary that scripts/ci/02_compile.sh already built into dist/. That keeps
+# the CI's compile and package stages separate, so the binary is compiled once
+# and can also be kept as a pipeline artifact.
+#
+# Build context is the repository root, as the COPY paths (docker/..., dist/...)
+# require:
+#
+#   docker build -f Dockerfile.sitl.package \
+#       --build-arg RUNTIME_BASE_IMAGE=<harbor>/inav-sitl-runtime-base:22.04 \
+#       -t inav-sitl:<tag> .
+#
+# The runtime base carries ca-certificates + iproute2; nothing here reaches the
+# network (the package guard only apt-installs if the base somehow lacks them).
+# For a one-shot local build (compile + package in one) use Dockerfile.sitl
+# instead.
+
+ARG RUNTIME_BASE_IMAGE=registry.ghostcloud.cn/integration/inav-sitl-runtime-base:22.04
+
+FROM ${RUNTIME_BASE_IMAGE}
+
+RUN set -eux; \
+    missing=""; \
+    for pkg in ca-certificates iproute2; do \
+        dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"; \
+    done; \
+    if [ -n "$missing" ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends $missing; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    useradd --create-home --uid 1000 inav; \
+    mkdir -p /data; \
+    chown inav:inav /data
+
+# The prebuilt SITL binary from the compile stage.
+COPY dist/inav_*_SITL /opt/inav/
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/eeprom.default.bin /opt/inav/eeprom.default.bin
+COPY docker/eeprom.msp.bin /opt/inav/eeprom.msp.bin
+COPY docker/launch_sitl.sh /opt/inav/launch_sitl.sh
+COPY docker/sitl.conf.example /opt/inav/sitl.conf.example
+
+# Both eeproms stay root-owned and read-only on purpose: they are only ever the
+# *source* of a copy, never the live eeprom. The firmware opens the eeprom "r+",
+# and a read-only eeprom is not a degraded mode -- the failed open is not
+# checked before the fwrite, so it is a SIGSEGV with no ports bound.
+#
+# cp() creates the destination with the source's mode, which makes this 0444 a
+# live grenade: the seeded /data/eeprom.bin comes out read-only too and hangs
+# the firmware on the very first boot. entrypoint.sh chmods the copy back.
+#
+# eeprom.msp.bin is the same config with receiver_type = MSP instead of SIM, so
+# the RC comes from an MSP client on the TCP port rather than from the
+# simulator's datarefs; make_msp_eeprom.py derives it and checks the checksum.
+#
+# Explicit modes rather than +x because building from a Windows tree mounts the
+# context through 9p, which reports every file as 777.
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /opt/inav/launch_sitl.sh \
+    && chmod 0644 /opt/inav/sitl.conf.example \
+    && chmod 0444 /opt/inav/eeprom.default.bin /opt/inav/eeprom.msp.bin
+
+USER inav
+WORKDIR /data
+
+# 5760-5767: the only inbound listeners -- SITL UART sockets (UART1..8), where
+# the Configurator / MSP clients connect. serial_tcp.c binds and listens here.
+#
+# No EXPOSE for the simulator link. 49000/udp is the *UE-side* port (SIM_PORT):
+# ue.c never binds a local port, it sendto()s SIM_IP:49000+N and recvfrom()s the
+# replies on the ephemeral source port the kernel picked.
+EXPOSE 5760-5767/tcp
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

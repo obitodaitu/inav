@@ -4,9 +4,27 @@
 # environment (inav-build). This one builds the host SITL binary and ships a
 # small runtime image you can point at a simulator.
 #
+#   # online, once: build and push the two base images (see Dockerfile.sitl-base)
+#   docker build -f Dockerfile.sitl-base --target builder-base -t registry.ghostcloud.cn/integration/inav-sitl-builder-base:22.04 .
+#   docker build -f Dockerfile.sitl-base --target runtime-base -t registry.ghostcloud.cn/integration/inav-sitl-runtime-base:22.04 .
+#
+#   # offline / CI: builds against the mirrored bases, no apt, no network
 #   docker build -f Dockerfile.sitl -t inav-sitl:9.1 .
+#
 #   docker run --rm -it --network host inav-sitl:9.1 \
 #       --sim=ue --simip=<HOST_IP> --simport=49000
+#
+# The two base args default to the pre-baked images on the internal Harbor, so
+# the bare build above works air-gapped with no arguments. Override them with
+# --build-arg to build against a plain ubuntu:22.04 instead (the package guard
+# below then falls back to apt, which needs network).
+#
+# NOTE: the registry host below is hardcoded as registry.ghostcloud.cn. If the
+# build nodes resolve the Harbor under a different name -- e.g. the in-cluster
+# registry.cluster.local:30443 -- either edit the two defaults or override them
+# in CI:
+#   --build-arg BUILDER_BASE_IMAGE=<host>/integration/inav-sitl-builder-base:22.04 \
+#   --build-arg RUNTIME_BASE_IMAGE=<host>/integration/inav-sitl-runtime-base:22.04
 #
 # The image is self-contained: it carries the SITL binary, a *configured*
 # eeprom to boot from, and the launcher that drives a whole fleet. The one
@@ -26,21 +44,28 @@
 # black-holing every subscription.
 
 # ---------- builder ----------
-FROM ubuntu:22.04 AS builder
+ARG BUILDER_BASE_IMAGE=registry.ghostcloud.cn/integration/inav-sitl-builder-base:22.04
+ARG RUNTIME_BASE_IMAGE=registry.ghostcloud.cn/integration/inav-sitl-runtime-base:22.04
+
+FROM ${BUILDER_BASE_IMAGE} AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        cmake \
-        g++ \
-        gcc \
-        git \
-        ninja-build \
-        python3 \
-        python3-yaml \
-        ruby \
-    && rm -rf /var/lib/apt/lists/*
+# Every package below is baked into the builder-base target of
+# Dockerfile.sitl-base. The guard keeps this Dockerfile usable against a plain
+# ubuntu:22.04 too: then the packages are missing, apt runs and needs network.
+# With the pre-baked base nothing is missing, so no apt-get (and no network) is
+# touched -- which is what makes the air-gapped CI build work.
+RUN set -eux; \
+    missing=""; \
+    for pkg in ca-certificates cmake g++ gcc git ninja-build python3 python3-yaml ruby; do \
+        dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"; \
+    done; \
+    if [ -n "$missing" ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends $missing; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
 
 WORKDIR /src
 COPY . .
@@ -57,17 +82,21 @@ RUN git init -q . \
     && ninja -C build_SITL
 
 # ---------- runtime ----------
-FROM ubuntu:22.04
+FROM ${RUNTIME_BASE_IMAGE}
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        iproute2 \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 1000 inav \
-    && mkdir -p /data \
-    && chown inav:inav /data
+RUN set -eux; \
+    missing=""; \
+    for pkg in ca-certificates iproute2; do \
+        dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"; \
+    done; \
+    if [ -n "$missing" ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends $missing; \
+        rm -rf /var/lib/apt/lists/*; \
+    fi; \
+    useradd --create-home --uid 1000 inav; \
+    mkdir -p /data; \
+    chown inav:inav /data
 
 COPY --from=builder /src/build_SITL/inav_*_SITL /opt/inav/
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
@@ -105,8 +134,13 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh /opt/inav/launch_sitl.sh \
 USER inav
 WORKDIR /data
 
-# 5760-5767: MSP/UART TCP sockets (Configurator), 49000/udp: simulator link
+# 5760-5767: the only inbound listeners -- SITL UART sockets (UART1..8), where
+# the Configurator / MSP clients connect. serial_tcp.c binds and listens here.
+#
+# No EXPOSE for the simulator link. 49000/udp is the *UE-side* port (SIM_PORT):
+# ue.c never binds a local port, it sendto()s SIM_IP:49000+N and recvfrom()s the
+# replies on the ephemeral source port the kernel picked. EXPOSE is metadata
+# only and, with the required --network host, would publish nothing anyway.
 EXPOSE 5760-5767/tcp
-EXPOSE 49000/udp
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -249,7 +249,7 @@ entrypoint 把它改写成 `SIM=ue` + MSP eeprom。**不能透传给固件**：[
 
 > 回退**只在 `--network host` 下成立**。省掉 `--network host` 容器会进 default bridge，网关变成 docker bridge（`172.17.0.1`），那只到 WSL 虚拟机、到不了 Windows 上的 UE。
 
-**防火墙**：容器的仿真链路是往 `SIM_IP` 发包、然后在本机监听 `49000 + N` 收回复，所以 UE 那台机器的**入站** UDP 需要放行 49000 起的这一段（4 架就是 49000-49003/udp）。
+**防火墙**：容器从本机一个**临时源端口**往 `SIM_IP:49000 + N` 发订阅包，UE 把回复发回这个源端口（`ue.c` 不 `bind`，源端口由内核临时分配）。所以需要放行的是 **UE 那台机器的入站 UDP 49000 起这一段**（4 架就是 49000-49003/udp）—— 容器自己并不在 49000 上监听。
 
 ---
 
@@ -470,16 +470,32 @@ INDICES=0,1,2,3          # 起哪几架
 
 ## 十、搬到别的服务器
 
-在构建机上：
+构建分成两步，第二步可以完全离线跑（内网 CI 就是这一步）：
 
 ```bash
-cd /mnt/c/Github/inav
+# 第一步：在有外网的机器上做两个「预装依赖」基础镜像，推到内网 Harbor
+#   builder-base 带整套编译工具链（约 727MB），只在编译阶段用，不进最终镜像
+#   runtime-base 只有 ca-certificates + iproute2（约 128MB），最终镜像基于它
+REG=registry.ghostcloud.cn/integration
+docker build -f Dockerfile.sitl-base --target builder-base -t $REG/inav-sitl-builder-base:22.04 .
+docker build -f Dockerfile.sitl-base --target runtime-base -t $REG/inav-sitl-runtime-base:22.04 .
+docker push $REG/inav-sitl-builder-base:22.04
+docker push $REG/inav-sitl-runtime-base:22.04
+
+# 第二步：内网 CI 直接构建，无需任何 --build-arg，全程不碰 apt/外网
 docker build -f Dockerfile.sitl -t inav-sitl:9.1 .
+
 docker save inav-sitl:9.1 | gzip > inav-sitl-9.1.tar.gz
 sha256sum inav-sitl-9.1.tar.gz > inav-sitl-9.1.tar.gz.sha256
 ```
 
-> 这套 WSL 上 `docker` 已经在组里，不用 `sudo`。如果你的机器要，全程加 `sudo` 即可，脚本那条改 `DOCKER=sudo\ docker`。
+也可以用 `docker/build_sitl_image.sh base|image` 把上面两步各跑一条命令。
+
+> **为什么要拆成两个**：builder 和 runtime 用同一个胖基础镜像的话，runtime 会继承整套工具链，最终镜像会从 135MB 涨到 ~730MB。拆开后 builder-base 只在编译阶段存在，最终镜像仍是 135MB。
+>
+> **默认就指向内网 Harbor**：`Dockerfile.sitl` 的 `BUILDER_BASE_IMAGE` / `RUNTIME_BASE_IMAGE` 两个 `ARG` 默认已是 `registry.ghostcloud.cn/integration/...`，所以 CI 里**不加参数**即可。要临时改回干净 `ubuntu:22.04` 构建，用 `--build-arg BUILDER_BASE_IMAGE=ubuntu:22.04 --build-arg RUNTIME_BASE_IMAGE=ubuntu:22.04` 覆盖，Dockerfile 里的依赖守卫会回退到 `apt-get`（需外网）。
+>
+> 这步在 WSL 上 `docker` 已经在组里，不用 `sudo`。如果你的机器要，全程加 `sudo` 即可，脚本那条改 `DOCKER=sudo\ docker`。
 
 传到目标服务器后：
 
