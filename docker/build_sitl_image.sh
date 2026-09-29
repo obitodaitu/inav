@@ -14,8 +14,9 @@
 #   docker/build_sitl_image.sh all      # both (online only)
 #
 # Environment:
-#   BASE_SOURCE          upstream image for the bases   (default ubuntu:22.04)
-#   BUILDER_BASE_IMAGE   ref used by the builder stage  (default registry.ghostcloud.cn/integration/inav-sitl-builder-base:22.04)
+#   BUILDER_SOURCE       upstream image for the builder base (default ubuntu:20.04)
+#   RUNTIME_SOURCE       upstream image for the runtime base (default ubuntu:22.04)
+#   BUILDER_BASE_IMAGE   ref used by the builder stage  (default registry.ghostcloud.cn/integration/inav-sitl-builder-base:20.04)
 #   RUNTIME_BASE_IMAGE   ref used by the runtime stage  (default registry.ghostcloud.cn/integration/inav-sitl-runtime-base:22.04)
 #   IMAGE                tag of the runtime image       (default inav-sitl:9.1)
 #   SAVE                 if set, docker save IMAGE to this .tar.gz after building
@@ -35,8 +36,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-BASE_SOURCE="${BASE_SOURCE:-ubuntu:22.04}"
-BUILDER_BASE_IMAGE="${BUILDER_BASE_IMAGE:-registry.ghostcloud.cn/integration/inav-sitl-builder-base:22.04}"
+BUILDER_SOURCE="${BUILDER_SOURCE:-ubuntu:20.04}"
+RUNTIME_SOURCE="${RUNTIME_SOURCE:-ubuntu:22.04}"
+BUILDER_BASE_IMAGE="${BUILDER_BASE_IMAGE:-registry.ghostcloud.cn/integration/inav-sitl-builder-base:20.04}"
 RUNTIME_BASE_IMAGE="${RUNTIME_BASE_IMAGE:-registry.ghostcloud.cn/integration/inav-sitl-runtime-base:22.04}"
 IMAGE="${IMAGE:-inav-sitl:9.1}"
 SAVE="${SAVE:-}"
@@ -46,19 +48,19 @@ usage() {
 }
 
 build_base() {
-    echo "*** Building builder base '${BUILDER_BASE_IMAGE}' from '${BASE_SOURCE}'"
+    echo "*** Building builder base '${BUILDER_BASE_IMAGE}' from '${BUILDER_SOURCE}'"
     docker build \
         --file "${REPO_ROOT}/Dockerfile.sitl-base" \
         --target builder-base \
-        --build-arg BASE_SOURCE="${BASE_SOURCE}" \
+        --build-arg BUILDER_SOURCE="${BUILDER_SOURCE}" \
         --tag "${BUILDER_BASE_IMAGE}" \
         "${REPO_ROOT}"
 
-    echo "*** Building runtime base '${RUNTIME_BASE_IMAGE}' from '${BASE_SOURCE}'"
+    echo "*** Building runtime base '${RUNTIME_BASE_IMAGE}' from '${RUNTIME_SOURCE}'"
     docker build \
         --file "${REPO_ROOT}/Dockerfile.sitl-base" \
         --target runtime-base \
-        --build-arg BASE_SOURCE="${BASE_SOURCE}" \
+        --build-arg RUNTIME_SOURCE="${RUNTIME_SOURCE}" \
         --tag "${RUNTIME_BASE_IMAGE}" \
         "${REPO_ROOT}"
 }

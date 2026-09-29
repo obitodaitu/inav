@@ -474,12 +474,12 @@ INDICES=0,1,2,3          # 起哪几架
 
 ```bash
 # 第一步：在有外网的机器上做两个「预装依赖」基础镜像，推到内网 Harbor
-#   builder-base 带整套编译工具链（约 727MB），只在编译阶段用，不进最终镜像
-#   runtime-base 只有 ca-certificates + iproute2（约 128MB），最终镜像基于它
+#   builder-base 基于 ubuntu:20.04（glibc 2.31，见下方说明），带整套编译工具链
+#   runtime-base 基于 ubuntu:22.04，只有 ca-certificates + iproute2（约 128MB）
 REG=registry.ghostcloud.cn/integration
-docker build -f Dockerfile.sitl-base --target builder-base -t $REG/inav-sitl-builder-base:22.04 .
+docker build -f Dockerfile.sitl-base --target builder-base -t $REG/inav-sitl-builder-base:20.04 .
 docker build -f Dockerfile.sitl-base --target runtime-base -t $REG/inav-sitl-runtime-base:22.04 .
-docker push $REG/inav-sitl-builder-base:22.04
+docker push $REG/inav-sitl-builder-base:20.04
 docker push $REG/inav-sitl-runtime-base:22.04
 
 # 第二步：内网 CI 直接构建，无需任何 --build-arg，全程不碰 apt/外网
@@ -493,7 +493,9 @@ sha256sum inav-sitl-9.1.tar.gz > inav-sitl-9.1.tar.gz.sha256
 
 > **为什么要拆成两个**：builder 和 runtime 用同一个胖基础镜像的话，runtime 会继承整套工具链，最终镜像会从 135MB 涨到 ~730MB。拆开后 builder-base 只在编译阶段存在，最终镜像仍是 135MB。
 >
-> **默认就指向内网 Harbor**：`Dockerfile.sitl` 的 `BUILDER_BASE_IMAGE` / `RUNTIME_BASE_IMAGE` 两个 `ARG` 默认已是 `registry.ghostcloud.cn/integration/...`，所以 CI 里**不加参数**即可。要临时改回干净 `ubuntu:22.04` 构建，用 `--build-arg BUILDER_BASE_IMAGE=ubuntu:22.04 --build-arg RUNTIME_BASE_IMAGE=ubuntu:22.04` 覆盖，Dockerfile 里的依赖守卫会回退到 `apt-get`（需外网）。
+> **builder-base 为什么用 20.04**：某些宿主机的 Docker seccomp 把 `clone3` 拦成 EPERM；Ubuntu 22.04 的 glibc 2.34+ 在 `posix_spawn` 里用 `clone3` 且**不回退**，导致 ninja/make 报 `posix_spawn: Operation not permitted`、CMake 判“编译器 broken”。20.04 的 glibc 2.31 用的是 `clone`，不会被拦，从而**无需改宿主机 seccomp** 也能编译。runtime-base 保持 22.04——glibc 2.31 编出的二进制在 2.35 上向后兼容。
+>
+> **默认就指向内网 Harbor**：`Dockerfile.sitl` 的 `BUILDER_BASE_IMAGE` / `RUNTIME_BASE_IMAGE` 两个 `ARG` 默认已是 `registry.ghostcloud.cn/integration/...`（builder `:20.04`、runtime `:22.04`），所以 CI 里**不加参数**即可。要临时改用干净 `ubuntu:22.04` 构建，用 `--build-arg BUILDER_BASE_IMAGE=ubuntu:22.04 --build-arg RUNTIME_BASE_IMAGE=ubuntu:22.04` 覆盖，Dockerfile 里的依赖守卫会回退到 `apt-get`（需外网）。
 >
 > 这步在 WSL 上 `docker` 已经在组里，不用 `sudo`。如果你的机器要，全程加 `sudo` 即可，脚本那条改 `DOCKER=sudo\ docker`。
 

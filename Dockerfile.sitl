@@ -5,7 +5,7 @@
 # small runtime image you can point at a simulator.
 #
 #   # online, once: build and push the two base images (see Dockerfile.sitl-base)
-#   docker build -f Dockerfile.sitl-base --target builder-base -t registry.ghostcloud.cn/integration/inav-sitl-builder-base:22.04 .
+#   docker build -f Dockerfile.sitl-base --target builder-base -t registry.ghostcloud.cn/integration/inav-sitl-builder-base:20.04 .
 #   docker build -f Dockerfile.sitl-base --target runtime-base -t registry.ghostcloud.cn/integration/inav-sitl-runtime-base:22.04 .
 #
 #   # offline / CI: builds against the mirrored bases, no apt, no network
@@ -44,7 +44,7 @@
 # black-holing every subscription.
 
 # ---------- builder ----------
-ARG BUILDER_BASE_IMAGE=registry.ghostcloud.cn/integration/inav-sitl-builder-base:22.04
+ARG BUILDER_BASE_IMAGE=registry.ghostcloud.cn/integration/inav-sitl-builder-base:20.04
 ARG RUNTIME_BASE_IMAGE=registry.ghostcloud.cn/integration/inav-sitl-runtime-base:22.04
 
 FROM ${BUILDER_BASE_IMAGE} AS builder

@@ -2,8 +2,8 @@
 #
 # Why this exists
 # ---------------
-# Dockerfile.sitl needs only two things from the network: the ubuntu:22.04 base
-# and a handful of apt packages. An air-gapped CI has neither. This Dockerfile
+# Dockerfile.sitl needs only two things from the network: the ubuntu base and a
+# handful of apt packages. An air-gapped CI has neither. This Dockerfile
 # resolves that by baking those packages into images that are built once where
 # the internet is reachable, then pushed into the internal registry.
 # Dockerfile.sitl consumes them via BUILDER_BASE_IMAGE / RUNTIME_BASE_IMAGE and
@@ -19,25 +19,37 @@
 # Sharing one fat base across both stages would drag the whole toolchain into
 # the final image (135MB -> ~730MB). Hence the split.
 #
+# Why the builder is on 20.04, not 22.04
+# --------------------------------------
+# On hosts whose Docker seccomp profile rejects clone3(2) with EPERM (older
+# default profiles), glibc 2.34+ -- which Ubuntu 22.04 ships -- uses clone3 in
+# posix_spawn and does NOT fall back on EPERM. Build tools that spawn via
+# posix_spawn (ninja, make) then die with "posix_spawn: Operation not
+# permitted", and CMake reports the C compiler as broken. Ubuntu 20.04's
+# glibc 2.31 implements posix_spawn with clone(2), which such a profile allows,
+# so the same build passes without touching the daemon. The runtime base stays
+# on 22.04: a binary linked against glibc 2.31 runs unchanged on 2.35.
+#
 # Build and publish (online side):
 #
 #   docker build -f Dockerfile.sitl-base --target builder-base \
-#       -t inav-sitl-builder-base:22.04 .
+#       -t inav-sitl-builder-base:20.04 .
 #   docker build -f Dockerfile.sitl-base --target runtime-base \
 #       -t inav-sitl-runtime-base:22.04 .
-#   docker tag inav-sitl-builder-base:22.04 <registry>/inav-sitl-builder-base:22.04
+#   docker tag inav-sitl-builder-base:20.04 <registry>/inav-sitl-builder-base:20.04
 #   docker tag inav-sitl-runtime-base:22.04 <registry>/inav-sitl-runtime-base:22.04
-#   docker push <registry>/inav-sitl-builder-base:22.04
+#   docker push <registry>/inav-sitl-builder-base:20.04
 #   docker push <registry>/inav-sitl-runtime-base:22.04
 #
-# BASE_SOURCE lets the upstream base itself be a mirrored tag.
+# BUILDER_SOURCE / RUNTIME_SOURCE let the upstream bases be mirrored tags.
 #
 # docker/build_sitl_image.sh base wraps both builds.
 
-ARG BASE_SOURCE=ubuntu:22.04
+ARG BUILDER_SOURCE=ubuntu:20.04
+ARG RUNTIME_SOURCE=ubuntu:22.04
 
 # ---------- builder-base: toolchain used by the builder stage ----------
-FROM ${BASE_SOURCE} AS builder-base
+FROM ${BUILDER_SOURCE} AS builder-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -54,7 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------- runtime-base: only what the runtime stage needs ----------
-FROM ${BASE_SOURCE} AS runtime-base
+FROM ${RUNTIME_SOURCE} AS runtime-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 

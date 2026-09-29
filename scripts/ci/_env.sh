@@ -19,7 +19,7 @@ IMAGE_TAG="${IMAGE_TAG:-$(git -C "$ROOT" describe --tags --always --dirty 2>/dev
 IMAGE_REF="${IMAGE_REF:-${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}}"
 
 # --- 预装基础镜像（Harbor，构建期唯一外部依赖）------------------------------
-BUILDER_BASE_IMAGE="${BUILDER_BASE_IMAGE:-${REGISTRY}/inav-sitl-builder-base:22.04}"
+BUILDER_BASE_IMAGE="${BUILDER_BASE_IMAGE:-${REGISTRY}/inav-sitl-builder-base:20.04}"
 RUNTIME_BASE_IMAGE="${RUNTIME_BASE_IMAGE:-${REGISTRY}/inav-sitl-runtime-base:22.04}"
 
 # --- 编译产物目录（只放最终二进制，作为制作镜像的构建上下文）----------------
