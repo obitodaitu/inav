@@ -14,8 +14,8 @@ ROOT="$(cd "${CI_DIR}/../.." && pwd)"
 # --- 镜像坐标 ---------------------------------------------------------------
 REGISTRY="${REGISTRY:-registry.ghostcloud.cn/integration}"
 IMAGE_NAME="${IMAGE_NAME:-inav-sitl}"
-# tag 优先取显式 IMAGE_TAG；否则用 git 描述（CI 里 checkout 后即 commit/tag），再退化 latest
-IMAGE_TAG="${IMAGE_TAG:-$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo latest)}"
+# 固定 tag v9.1.0（如需按提交区分，用 IMAGE_TAG=... 或 IMAGE_REF=... 覆盖）
+IMAGE_TAG="${IMAGE_TAG:-v9.1.0}"
 IMAGE_REF="${IMAGE_REF:-${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}}"
 
 # --- 预装基础镜像（Harbor，构建期唯一外部依赖）------------------------------
