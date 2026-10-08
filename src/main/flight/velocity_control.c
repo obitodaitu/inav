@@ -207,7 +207,8 @@ bool velocityControlIsActive(void)
  *   t  = 推力轴 = -机体系 +Z（线框系把推力轴读作 up）
  *   ẑ  = 世界竖直（本固件 rMat 的口径：天 = (0,0,-1)）
  *   期望 +Y 必须同时垂直于 t 和 ẑ  =>  dy = normalize(t × ẑ) = normalize(ty, -tx, 0)
- *   误差角 phi = 从当前 +Y 到 dy 绕 t 的带符号夹角
+ *   期望 +Y 取 ±dy 中**离当前更近**的那个（只约束滚转，不指定绕推力轴转到哪一侧）
+ *   误差角 phi = 从当前 +Y 到该期望方向绕 t 的带符号夹角，|phi| ≤ 90°
  *   绕 t 的角速率 = K * phi；t = -bodyZ，故写进 rcCommand[YAW] 的 bodyZ 速率取反
  *
  * 推力轴接近竖直（悬停）时 |t_h| → 0，此时 +Y 本来就水平、该自由度无定义，
@@ -244,10 +245,22 @@ static float rollHoldRateDps(const float maxYawDps)
     const float cosPhi = byx * ux + byy * uy;
 
     const float phiDeg = RADIANS_TO_DEGREES(atan2f(sinPhi, cosPhi));
-    vel.rollHoldPhiDeg = phiDeg;
+
+    /*
+     * 只约束滚转：把 +Y 拉到**最近的**那个水平解，不强制绕推力轴转到哪一侧。
+     * ±dy 给出同一个水平面、但绕推力轴差 180°；本机绕推力轴几乎没有权限
+     * （只有桨阻），硬拉远端解会变成一次 180° 慢滚。取 |phi| ≤ 90° 的那个。
+     */
+    float phiWrappedDeg = phiDeg;
+    if (phiWrappedDeg > 90.0f) {
+        phiWrappedDeg -= 180.0f;
+    } else if (phiWrappedDeg < -90.0f) {
+        phiWrappedDeg += 180.0f;
+    }
+    vel.rollHoldPhiDeg = phiWrappedDeg;
 
     // 绕 t 的速率 -> bodyZ 速率（t = -bodyZ）
-    const float rateAboutT = VEL_ROLL_HOLD_KP * phiDeg;
+    const float rateAboutT = VEL_ROLL_HOLD_KP * phiWrappedDeg;
     const float rateBodyZ = VEL_ROLL_HOLD_SIGN * -rateAboutT;
 
     return constrainf(rateBodyZ, -maxYawDps, maxYawDps);
