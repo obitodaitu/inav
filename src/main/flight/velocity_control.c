@@ -23,6 +23,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <math.h>
 
 #include "platform.h"
@@ -143,6 +144,9 @@ static struct {
     int16_t     outPitch;
     int16_t     outYaw;
     int16_t     outThrottle;
+
+    // 诊断（1Hz 遥测用）
+    float       rollHoldPhiDeg;
 } vel = {
     // 水平前向：输出 cm/s^2
     .pidFwd = { .kp = 3.0f, .ki = 1.5f, .kd = 0.0f, .iLimit = 500.0f, .dLimit = 5000.0f,
@@ -220,6 +224,7 @@ static float rollHoldRateDps(const float maxYawDps)
     const float dyy = -tx;
     const float dyMag = sqrtf(dyx * dyx + dyy * dyy);
     if (dyMag < VEL_ROLL_HOLD_MIN_TILT) {
+        vel.rollHoldPhiDeg = 0.0f;
         return 0.0f;
     }
 
@@ -239,6 +244,7 @@ static float rollHoldRateDps(const float maxYawDps)
     const float cosPhi = byx * ux + byy * uy;
 
     const float phiDeg = RADIANS_TO_DEGREES(atan2f(sinPhi, cosPhi));
+    vel.rollHoldPhiDeg = phiDeg;
 
     // 绕 t 的速率 -> bodyZ 速率（t = -bodyZ）
     const float rateAboutT = VEL_ROLL_HOLD_KP * phiDeg;
@@ -407,6 +413,24 @@ void taskVelocityControl(timeUs_t currentTimeUs)
     vel.outPitch    = pidRateToRcCommand(ratePitchCmd, ratePit);
     vel.outYaw      = pidRateToRcCommand(rateYawCmd, rateYaw);
     vel.outThrottle = (int16_t)throttle;
+
+    /* ---- 低频诊断（1 Hz，只在接管时打）：验证"xoz 平面竖直 / x 不朝上" ----
+     * xoz = rMat[2][1]，机体系 +Y 的世界"下"分量；xoz≈0 即 xoz 平面竖直。
+     * thup = 推力轴的世界"下"分量（= -rMat[2][2]）；>0 表示推力轴朝上（x 朝上）。
+     * phi = 滚转保持的误差角。验证完可删。 */
+    {
+        static timeMs_t dbgLastMs = 0;
+        const timeMs_t dbgNowMs = millis();
+        if (dbgNowMs - dbgLastMs >= 1000) {
+            dbgLastMs = dbgNowMs;
+            printf("VC xoz=%.3f thup=%.3f phi=%.1f th=%.1f ryaw=%.1f "
+                   "tgt=%.0f/%.0f/%.0f fb=%.0f/%.0f/%.0f\n",
+                   (double)rMat[2][1], (double)tD, (double)vel.rollHoldPhiDeg,
+                   (double)thetaDeg, (double)rateYawCmd,
+                   (double)vel.targetFwd, (double)vel.targetRight, (double)vel.targetUp,
+                   (double)fbFwd, (double)fbRight, (double)fbUp);
+        }
+    }
 
     /* 关掉 ANGLE/HORIZON/ANGLEHOLD：否则 rcCommand[ROLL/PITCH] 会被当成角度目标，
      * 又走回上面那条 euler 奇异的路。模式标志每周期由 RX 重算，而本函数在其后调用
