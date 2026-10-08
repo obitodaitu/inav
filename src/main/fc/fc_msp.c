@@ -2100,17 +2100,18 @@ static mspResult_e mspFcProcessInCommand(uint16_t cmdMSP, sbuf_t *src)
 #endif
 
     case MSP2_INAV_SET_VELOCITY:
+        // 外部 H 系三轴速度设定值：3 × float32，cm/s，x 前 / y 右 / z 天。
         if (dataSize == 3 * sizeof(float)) {
             union {
                 uint32_t u32;
                 float    f;
             } conv;
-            float velNed[3];
+            float velH[3];
             for (int i = 0; i < 3; i++) {
                 conv.u32 = sbufReadU32(src);
-                velNed[i] = conv.f;
+                velH[i] = conv.f;
             }
-            velocityControlSetTarget(velNed[0], velNed[1], velNed[2]);
+            velocityControlSetTarget(velH[0], velH[1], velH[2]);
             return MSP_RESULT_NO_REPLY;
         } else
             return MSP_RESULT_ERROR;

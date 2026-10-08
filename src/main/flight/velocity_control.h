@@ -1,21 +1,24 @@
 /*
- * velocity_control.h - Custom NED velocity controller for multirotor interceptors
+ * velocity_control.h - Custom H-frame velocity controller for multirotor interceptors
  *
- * 方案B：INAV 仅保留 ANGLE 姿态内环；本模块在飞控上自建 NED 三轴速度环。
+ * 方案B：INAV 仅保留 ANGLE 姿态内环；本模块在飞控上自建三轴速度环。
  *
  * 数据流：
- *   上位机 --(MSP2, NED 三轴速度 cm/s)--> velocityControlSetTarget()
- *   200Hz 周期任务 taskVelocityControl() 运行 PID，缓存 roll/pitch/throttle 输出
+ *   上位机 --(MSP2, H 系三轴速度 cm/s)--> velocityControlSetTarget()
+ *   200Hz 周期任务 taskVelocityControl() 运行 PID，缓存 roll/pitch/yaw/throttle 输出
  *   每个 PID(1kHz) 周期末尾 velocityControlApplyToRcCommand() 覆盖 rcCommand
  *
  * 坐标约定：
- *   外部指令：NED（X=北 Y=东 Z=向下）
- *   INAV 内部位置估计：NEU（X=北 Y=东 Z=向上），单位 cm / cm/s
- *   垂直轴在入口/反馈处做一次符号转换。
+ *   指令与反馈都在 **H 系**（与 algo 侧 inav/vel_cmd、planning、rcCommand 口径一致）：
+ *     x = 机头水平投影（前）  y = 右  z = 天
+ *   单位 cm/s。
+ *
+ *   实测速度来自 posEstimator.est.vel（地固 NEU），由本模块用航向投影到 H 系。
+ *   不引入 NED：INAV 的 rcCommand 接口本就是 H 系，algo 侧也是 H 系。
  *
  *   rcCommand 符号（INAV 固有约定，见 flight/pid.c computePidLevelTarget 的注释）：
  *     rcCommand[PITCH] 正 = 低头，rcCommand[ROLL] 正 = 右滚。
- *   本模块输出的 roll/pitch 目标角按同一约定给出：前向加速 -> pitch 为**正**。
+ *   前向加速 -> 机头下俯 -> pitch 目标角取**正**。
  *
  * This file is part of INAV.
  *
@@ -36,18 +39,18 @@
 void velocityControlReset(void);
 
 /*
- * 由 MSP2 速度指令调用：设置 NED 三轴速度目标。
- *   velN / velE / velD 单位 cm/s；velD 向下为正（NED）。
+ * 由 MSP2 速度指令调用：设置 H 系三轴速度目标。
+ *   vx = 前, vy = 右, vz = 天，单位 cm/s；z 向上为正。
  * 同时刷新指令时间戳，用作超时判据。
  */
-void velocityControlSetTarget(float velN, float velE, float velD);
+void velocityControlSetTarget(float vx, float vy, float vz);
 
 /* 200Hz 周期任务：读取速度反馈、运行三轴 PID、缓存姿态/油门输出 */
 void taskVelocityControl(timeUs_t currentTimeUs);
 
 /*
  * 每个 PID 周期调用（必须在 rcCommand 全部计算完成之后）：
- * 若控制器有效（指令新鲜、已解锁）则覆盖 rcCommand[ROLL/PITCH/THROTTLE]。
+ * 若控制器有效（指令新鲜、已解锁）则覆盖 rcCommand[ROLL/PITCH/YAW/THROTTLE]。
  */
 void velocityControlApplyToRcCommand(void);
 

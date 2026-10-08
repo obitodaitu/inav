@@ -136,7 +136,8 @@
 
 #define MSP2_INAV_WIND                          0x2231
 
-// 外部 NED 三轴速度设定值（in message）：3 × float32，cm/s，NED（Vd 正 = 下降）。
+// 外部 H 系三轴速度设定值（in message）：3 × float32，cm/s，
+// x = 机头水平投影（前）/ y = 右 / z = 天。
 // 飞控侧自建速度环完成"速度 -> RPYT"，见 flight/velocity_control.c。
 #define MSP2_INAV_SET_VELOCITY                  0x203D
 
