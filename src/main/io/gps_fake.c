@@ -64,7 +64,9 @@ void gpsFakeSet(
     time_t time)
 {
     gpsSolDRV.fixType = fixType;
-    gpsSolDRV.hdop = gpsSol.fixType == GPS_NO_FIX ? 9999 : 100;
+    /* hdop 单位 0.1：原来写 100 = HDOP 10.0，与 16 星 3D fix 自相矛盾，
+     * 会让 iNav 认为定位精度极差（导航信任度/告警被带偏）。按 16 星取 1.0。 */
+    gpsSolDRV.hdop = gpsSol.fixType == GPS_NO_FIX ? 9999 : 10;
     gpsSolDRV.numSat = numSat;
     
     gpsSolDRV.llh.lat = lat;

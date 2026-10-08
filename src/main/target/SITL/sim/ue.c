@@ -272,6 +272,24 @@ static float velEast = 0;
 static float velDown = 0;
 static int numSats = 16;
 static int fixType = GPS_FIX_3D;
+
+/* UE 侧 GPS fix 用 MSP/NMEA 约定 0/1/2/3（UE 侧硬编码 GpsFixType = 3 = 3D fix，
+ * 见 SimulatorSystem Plugins/InavSim 的 InavSimTypes.h 与 InavInterceptorPawn.cpp），
+ * 而 INAV 的 gpsFixType_e 只有 0/1/2（GPS_FIX_3D = 2）。原来直接 (gpsFixType_e) 强转，
+ * 把 3 原样塞进枚举，导致 firmware 的 gpsProcessNewSolutionData() 里
+ *   gpsSol.fixType == GPS_FIX_3D
+ * 永远为假 → DISABLE_STATE(GPS_FIX) → 位置估计器 onNewGPSData() 提前 return，
+ * gpsOrigin 永不置位 → EST_GPS_XY_VALID / EST_XY_VALID 不置位 → posEstimator
+ * 水平速度恒 0（垂直有气压计所以正常）→ 固件速度环水平反馈为 0、倾角长期饱和，
+ * 滚转保持压不住（xoz 面长期倾斜）。此处是唯一一处边界换算，单一映射，不做兜底。 */
+static gpsFixType_e ueToInavGpsFixType(int ueFixType)
+{
+    switch (ueFixType) {
+    case 3:  return GPS_FIX_3D;
+    case 2:  return GPS_FIX_2D;
+    default: return GPS_NO_FIX;
+    }
+}
 static float roll = 0;
 static float pitch = 0;
 static float yaw = 0;
@@ -633,7 +651,7 @@ static bool exchangeDataWithUe(void)
     }
 
     gpsFakeSet(
-        (gpsFixType_e)fixType,
+        ueToInavGpsFixType(fixType),
         (uint8_t)numSats,
         /* 显式 (double) 转换：本工程带 -fsingle-precision-constant，裸的浮点字面量
          * 会被当成 float，与 double 的 latitude 相乘时又退化回单精度 —— 那正是
