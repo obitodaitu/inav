@@ -135,3 +135,18 @@
 #define MSP2_INAV_SET_AUX_RC                    0x2230
 
 #define MSP2_INAV_WIND                          0x2231
+
+// 外部 NED 三轴速度设定值（in message）：3 × float32，cm/s，NED（Vd 正 = 下降）。
+// 飞控侧自建速度环完成"速度 -> RPYT"，见 flight/velocity_control.c。
+#define MSP2_INAV_SET_VELOCITY                  0x203D
+
+/*
+ * Timestamped variants of the messages above. The payload is the untimed
+ * message followed by the simulator sample time as two little-endian u32 (low
+ * word first), Unix epoch nanoseconds on the simulator's clock. 0 means the
+ * simulator has not delivered a frame yet and must not be read as 1970.
+ */
+#define MSP2_INAV_IMU_TIMED                     0x2240
+#define MSP2_INAV_ATTITUDE_TIMED                0x2241
+#define MSP2_INAV_LOCAL_POSE_TIMED              0x2242
+#define MSP2_INAV_RAW_GPS_TIMED                 0x2243

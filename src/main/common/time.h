@@ -120,3 +120,21 @@ bool rtcSet(rtcTime_t *t);
 bool rtcGetDateTime(dateTime_t *dt);
 bool rtcGetDateTimeLocal(dateTime_t *dt);
 bool rtcSetDateTime(dateTime_t *dt);
+
+/*
+ * Simulator sample time.
+ *
+ * The SITL simulator backend injects sensor values that the simulator computed,
+ * so the instant that belongs on that data is the simulator's, not the moment
+ * INAV happened to read the fake sensor registers. The backend publishes the
+ * sample time here once per received frame and the MSP layer stamps what it
+ * sends with it, which is what lets a consumer line up an image with the sensor
+ * sample it was rendered against.
+ *
+ * The value is Unix epoch nanoseconds on the simulator's clock (for the UE
+ * backend, the host wall clock). It is 0 until the first frame arrives and
+ * whenever no simulator is attached - consumers must treat 0 as "unknown".
+ */
+void simTimeSetSample(int64_t sampleNs, timeUs_t sampleUs);
+int64_t simTimeGetSampleNs(void);
+int64_t simTimeGetNowNs(timeUs_t nowUs);

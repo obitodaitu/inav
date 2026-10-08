@@ -85,7 +85,7 @@
 #include "target/SITL/sim/simHelper.h"
 
 #define UE_PORT                 49000
-#define UE_PROTOCOL_VERSION     1
+#define UE_PROTOCOL_VERSION     2
 #define UE_HANDSHAKE_TIMEOUT_MS 10000
 #define UE_RECV_TIMEOUT_MS      500
 #define UE_SIM_LOST_MS          1000
@@ -153,6 +153,16 @@ typedef enum
 
     UE_DREF_RC_CHANNEL_8 = UE_DREF_RC_CHANNEL_1 + UE_RC_CHANNEL_COUNT - 1,
 
+    /* Simulator sample time, sent as four 16-bit chunks of the int64 Unix epoch
+     * nanoseconds the plugin stamps each frame with. ns0 is the least
+     * significant chunk and every chunk is an exact float32. Appended here so
+     * that every existing index stays put: the plugin's table mirrors this enum
+     * index for index. */
+    UE_DREF_TIME_NS_0,
+    UE_DREF_TIME_NS_1,
+    UE_DREF_TIME_NS_2,
+    UE_DREF_TIME_NS_3,
+
     UE_DREF_COUNT,
 } ueDref_t;
 
@@ -208,6 +218,11 @@ static const char * const ueDrefNames[UE_DREF_COUNT] = {
     [UE_DREF_RC_CHANNEL_1 + 5]  = "inav_ue/rc/channel[5]",
     [UE_DREF_RC_CHANNEL_1 + 6]  = "inav_ue/rc/channel[6]",
     [UE_DREF_RC_CHANNEL_1 + 7]  = "inav_ue/rc/channel[7]",
+
+    [UE_DREF_TIME_NS_0]         = "inav_ue/time/ns0",
+    [UE_DREF_TIME_NS_1]         = "inav_ue/time/ns1",
+    [UE_DREF_TIME_NS_2]         = "inav_ue/time/ns2",
+    [UE_DREF_TIME_NS_3]         = "inav_ue/time/ns3",
 };
 
 static const char * const ueMotorDrefNames[UE_MAX_MOTORS] = {
@@ -273,6 +288,9 @@ static float batteryCurrent = 0;
 static uint16_t rssi = 0;
 static bool failsafe = false;
 static bool rcValid = false;
+
+/* Last received sample time, as four 16-bit chunks of the plugin's int64. */
+static uint16_t simTimeChunk[4] = { 0, 0, 0, 0 };
 static float rcChannels[UE_RC_CHANNEL_COUNT];
 
 // Liveness tracking
@@ -547,6 +565,22 @@ static bool exchangeDataWithUe(void)
                 rcValid = value >= 0.5f;
                 break;
 
+            case UE_DREF_TIME_NS_0:
+                simTimeChunk[0] = (uint16_t)value;
+                break;
+
+            case UE_DREF_TIME_NS_1:
+                simTimeChunk[1] = (uint16_t)value;
+                break;
+
+            case UE_DREF_TIME_NS_2:
+                simTimeChunk[2] = (uint16_t)value;
+                break;
+
+            case UE_DREF_TIME_NS_3:
+                simTimeChunk[3] = (uint16_t)value;
+                break;
+
             default:
                 if (dref >= UE_DREF_RC_CHANNEL_1 && dref <= UE_DREF_RC_CHANNEL_8) {
                     rcChannels[dref - UE_DREF_RC_CHANNEL_1] = value;
@@ -557,6 +591,21 @@ static bool exchangeDataWithUe(void)
 
     if (!gotData) {
         return false;
+    }
+
+    /* Publish the simulator's own instant for this frame, so everything INAV
+     * derives from it can be stamped with the clock the simulator and its
+     * images share rather than with INAV's local one. */
+    {
+        const int64_t sampleNs =
+            (int64_t)simTimeChunk[0] |
+            ((int64_t)simTimeChunk[1] << 16) |
+            ((int64_t)simTimeChunk[2] << 32) |
+            ((int64_t)simTimeChunk[3] << 48);
+
+        if (sampleNs != 0) {
+            simTimeSetSample(sampleNs, micros());
+        }
     }
 
     // Wire yaw and heading are degrees (see the convention table in ue.h), so

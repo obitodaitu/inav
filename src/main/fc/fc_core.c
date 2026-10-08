@@ -85,6 +85,7 @@
 #include "flight/mixer_profile.h"
 #include "flight/mixer.h"
 #include "flight/servos.h"
+#include "flight/velocity_control.h"
 #include "flight/pid.h"
 #include "flight/imu.h"
 #include "flight/rate_dynamics.h"
@@ -446,6 +447,9 @@ static void processPilotAndFailSafeActions(float dT)
             rcCommand[ROLL] = rcCommand[ROLL] * cosDiff - rcCommand[PITCH] * sinDiff;
             rcCommand[PITCH] = rcCommand_PITCH;
         }
+
+        // Custom velocity controller overrides rcCommand after all pilot inputs are computed
+        velocityControlApplyToRcCommand();
     }
 }
 
