@@ -635,9 +635,12 @@ static bool exchangeDataWithUe(void)
     gpsFakeSet(
         (gpsFixType_e)fixType,
         (uint8_t)numSats,
-        (int32_t)lround(latitude * 10000000.0),
-        (int32_t)lround(longitude * 10000000.0),
-        (int32_t)lround(gpsElevation * 100.0),
+        /* 显式 (double) 转换：本工程带 -fsingle-precision-constant，裸的浮点字面量
+         * 会被当成 float，与 double 的 latitude 相乘时又退化回单精度 —— 那正是
+         * 原来 64e-7 度量化的来源。1e7 / 100 在 float 里都是精确值，转换无损。 */
+        (int32_t)lround(latitude * (double)10000000.0),
+        (int32_t)lround(longitude * (double)10000000.0),
+        (int32_t)lround(gpsElevation * (double)100.0),
         (int16_t)roundf(groundspeed * 100.0f),
         (int16_t)roundf(heading * 10.0f),
         (int16_t)roundf(velNorth * 100.0f),

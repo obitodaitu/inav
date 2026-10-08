@@ -62,18 +62,20 @@
 /* 推力轴水平分量低于此值时"滚转保持"退化（悬停），不作用。 */
 #define VEL_ROLL_HOLD_MIN_TILT      0.15f
 
+/* 姿态层：方向误差 -> 机体角速率(dps) 的比例增益 */
+#define VEL_ATT_KP                  4.0f
+/* 推力轴水平分量低于此值时"方位"退化（推力轴接近竖直），只做倾角。 */
+#define VEL_ATT_MIN_HORIZ           0.15f
+
 /*
- * 控制方向符号（台架验证：若某轴反应方向相反，翻转对应符号）
+ * rMat 的地球系与"真地球"差一个绕东轴的镜像（北分量取反）。
  *
- * INAV 的 rcCommand 约定是 **pitch 正 = 低头**（见 flight/pid.c 里
- * computePidLevelTarget 的注释："Positive rcCommand means nose should point
- * downwards"），pidAngleToRcCommand 保号。所以：
- *   前向加速 -> 机头下俯 -> pitch 目标角取**正**
- *   右向加速 -> 右滚     -> roll  目标角取正
- * 别按"pitch 正 = 抬头"的航空惯例去读这里的角，那会把俯仰写成反的。
+ * 本仿真实测（docs/tg_wander_turn_hover.md §5.1）：指令方位 331° 时 rMat 解出的
+ * 推力轴方位也是 331°，而 GPS 速度航向是 212°；180-331 = -151 ≡ 209° ≈ 212°，
+ * 即车飞的正是推力关于东西轴的镜像。所以期望方向 d 也要翻北分量，才能与
+ * t（来自 rMat）同处一个系。改 0 即关掉这个补偿。
  */
-#define VEL_ROLL_SIGN               1.0f
-#define VEL_PITCH_SIGN              1.0f
+#define VEL_ATT_MIRROR_NORTH        1
 
 /* ---------------- 内部 PID 结构 ---------------- */
 
@@ -298,23 +300,81 @@ void taskVelocityControl(timeUs_t currentTimeUs)
     float aRight = velPidApply(&vel.pidRight, vel.targetRight, fbRight, dt);
 
     // 限制合成水平加速度幅值
-    const float aMag = sqrtf(aFwd * aFwd + aRight * aRight);
+    float aMag = sqrtf(aFwd * aFwd + aRight * aRight);
     if (aMag > VEL_MAX_HORIZ_ACC_CMSS) {
         const float scale = VEL_MAX_HORIZ_ACC_CMSS / aMag;
         aFwd *= scale;
         aRight *= scale;
+        aMag = VEL_MAX_HORIZ_ACC_CMSS;
     }
 
     /*
-     * 期望姿态（decidegrees）。atan2 完整公式：推力方向(水平 a, 垂直 g)
+     * ---- 期望姿态：用旋转矢量，不用 euler ----
      *
-     * 符号按 INAV 的 rcCommand 约定（pitch 正 = 低头、roll 正 = 右滚）：
-     *   前向加速 -> 机头下俯 -> pitch 取**正**
-     *   右向加速 -> 右滚     -> roll  取正
-     * 这里没有取负：pidAngleToRcCommand 保号，取负会让俯仰整个反过来。
+     * iNav 角度环的误差是逐轴相减（flight/pid.c pidLevel: angleTarget - attitude.raw[axis]），
+     * 在 pitch ≈ ±90° 处奇异、roll/yaw 互相耦合。后续会有 pitch > 80° 的位形，
+     * 所以这里不走 ANGLE 模式，改成纯矢量 / 旋转矩阵：
+     *
+     *   1) 由水平加速度求期望**推力轴方向** d（单位矢量），不是三个欧拉角
+     *   2) 实际推力轴 t 直接从 rMat 读出（t = -机体系 +Z；线框系把推力轴读作 up）
+     *   3) 方向误差分解成"绕世界竖直的方位"与"绕水平轴的倾角"两半：
+     *      方位只改航向、倾角只改俯仰 —— 这样转弯不会把机头抬起来
+     *      （旧的最短路径实现会让 x 轴在连续转弯中朝上）
+     *   4) 地系角速度 -> rMatᵀ -> 机体系角速率 -> rcCommand[ROLL/PITCH]
+     *
+     * 全程只有矢量与旋转矩阵，θ=90° 处既不奇异也不退化。
      */
-    const float pitchTargetDg = VEL_PITCH_SIGN * RADIANS_TO_DECIDEGREES(atan2f(aFwd, GRAVITY_CMSS));
-    const float rollTargetDg  = VEL_ROLL_SIGN  * RADIANS_TO_DECIDEGREES(atan2f(aRight, GRAVITY_CMSS));
+    const float thetaDeg = RADIANS_TO_DEGREES(atan2f(aMag, GRAVITY_CMSS));   /* 期望倾角 */
+    const float psiCmd = atan2f(aRight, aFwd);                               /* H 系里期望加速度的方位 */
+
+    /* H 系基矢量（算在 rMat 的地球系里）；psi 就是本函数反馈投影用的那个航向 */
+    const float xhN = cpsi,  xhE = spsi;      /* x̂ = (cos psi, sin psi) */
+    const float yhN = -spsi, yhE = cpsi;      /* ŷ = (-sin psi, cos psi) */
+    const float cpc = cosf(psiCmd);
+    const float spc = sinf(psiCmd);
+    const float dhN = xhN * cpc + yhN * spc;
+    const float dhE = xhE * cpc + yhE * spc;
+
+    const float sinTh = sinf(DEGREES_TO_RADIANS(thetaDeg));
+    const float cosTh = cosf(DEGREES_TO_RADIANS(thetaDeg));
+
+    /* 期望推力轴（天 = (0,0,-1)）。VEL_ATT_MIRROR_NORTH 见常量处的说明。 */
+    const float dN = VEL_ATT_MIRROR_NORTH ? -(sinTh * dhN) : (sinTh * dhN);
+    const float dE = sinTh * dhE;
+    const float dD = -cosTh;
+
+    /* 实测推力轴（rMat 系） */
+    const float tN = -rMat[0][2], tE = -rMat[1][2], tD = -rMat[2][2];
+
+    /* 方位误差绕世界竖直 up=(0,0,-1)；倾角误差绕水平轴 a_tilt=normalize(th×up) */
+    const float thx = tN, thy = tE;
+    const float dhx = dN, dhy = dE;
+    const float thMag = sqrtf(thx * thx + thy * thy);
+    const float dhMag = sqrtf(dhx * dhx + dhy * dhy);
+
+    const float elevT = RADIANS_TO_DEGREES(asinf(constrainf(-tD, -1.0f, 1.0f)));
+    const float elevD = RADIANS_TO_DEGREES(asinf(constrainf(-dD, -1.0f, 1.0f)));
+    const float dElev = elevD - elevT;
+
+    float dPsi = 0.0f;
+    if (thMag > VEL_ATT_MIN_HORIZ && dhMag > VEL_ATT_MIN_HORIZ) {
+        dPsi = RADIANS_TO_DEGREES(atan2f(-(thx * dhy - thy * dhx), thx * dhx + thy * dhy));
+    }
+
+    float weN = 0.0f, weE = 0.0f, weD = 0.0f;
+    if (thMag > VEL_ATT_MIN_HORIZ) {
+        weD += -dPsi;                                    /* 方位：绕 up */
+        weN += dElev * (-thy / thMag);                   /* 倾角：绕 a_tilt */
+        weE += dElev * (thx / thMag);
+    } else if (dhMag > VEL_ATT_MIN_HORIZ) {
+        /* 推力轴已接近竖直：方位无定义，只把推力轴朝 dh 掰过去 */
+        weN += (-dElev) * (dhy / dhMag);
+        weE += (-dElev) * (-dhx / dhMag);
+    }
+
+    /* 地系 -> 机体系：乘 rMatᵀ */
+    const float rvBx = rMat[0][0] * weN + rMat[1][0] * weE + rMat[2][0] * weD;
+    const float rvBy = rMat[0][1] * weN + rMat[1][1] * weE + rMat[2][1] * weD;
 
     /* ---- 垂直速度环：输出油门（µs） ---- */
     const float idle  = (float)getThrottleIdleValue();
@@ -334,14 +394,26 @@ void taskVelocityControl(timeUs_t currentTimeUs)
     const float maxYawDps = rateYaw * 10.0f;
     const float rateYawCmd = rollHoldRateDps(maxYawDps);
 
-    /* ---- 转换为 rcCommand 并缓存 ---- */
-    const int16_t maxIncR = (int16_t)pidProfile()->max_angle_inclination[FD_ROLL];
-    const int16_t maxIncP = (int16_t)pidProfile()->max_angle_inclination[FD_PITCH];
+    /* ---- 方向误差 -> 机体角速率指令 ---- */
+    const uint8_t rateRll = currentControlProfile->stabilized.rates[FD_ROLL];
+    const uint8_t ratePit = currentControlProfile->stabilized.rates[FD_PITCH];
+    const float maxRllDps = rateRll * 10.0f;
+    const float maxPitDps = ratePit * 10.0f;
 
-    vel.outRoll     = pidAngleToRcCommand(rollTargetDg, maxIncR);
-    vel.outPitch    = pidAngleToRcCommand(pitchTargetDg, maxIncP);
+    const float rateRollCmd  = constrainf(VEL_ATT_KP * rvBx, -maxRllDps, maxRllDps);
+    const float ratePitchCmd = constrainf(VEL_ATT_KP * rvBy, -maxPitDps, maxPitDps);
+
+    vel.outRoll     = pidRateToRcCommand(rateRollCmd, rateRll);
+    vel.outPitch    = pidRateToRcCommand(ratePitchCmd, ratePit);
     vel.outYaw      = pidRateToRcCommand(rateYawCmd, rateYaw);
     vel.outThrottle = (int16_t)throttle;
+
+    /* 关掉 ANGLE/HORIZON/ANGLEHOLD：否则 rcCommand[ROLL/PITCH] 会被当成角度目标，
+     * 又走回上面那条 euler 奇异的路。模式标志每周期由 RX 重算，而本函数在其后调用
+     * （fc_core.c processPilotAndFailSafeActions 末尾），故本周期有效。 */
+    DISABLE_FLIGHT_MODE(ANGLE_MODE);
+    DISABLE_FLIGHT_MODE(HORIZON_MODE);
+    DISABLE_FLIGHT_MODE(ANGLEHOLD_MODE);
 }
 
 void velocityControlApplyToRcCommand(void)
