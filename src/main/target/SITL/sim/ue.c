@@ -257,14 +257,9 @@ static pthread_t listenThread = 0;
 static bool useImu = false;
 
 // Sensors reported by the simulator
-/* 经纬度必须用 double 存、并用 double 做乘 1e7 的定点换算。
- * 原来是 float，且乘法写成 `latitude * 10000000.0f` —— 104.52 * 1e7 ≈ 1.045e9，
- * 该量级 float32 的 ULP = 2^(29-23) = 64，于是送进 iNav 的经纬度被量化成
- * 64e-7 度（经度 0.61 m）、32e-7 度（纬度 0.36 m）。位置分辨率只有零点几米时，
- * "首次接近 < 0.5 m" 这个判据本身就没有意义了。 */
-static double latitude = 0;
-static double longitude = 0;
-static double gpsElevation = 0;
+static float latitude = 0;
+static float longitude = 0;
+static float gpsElevation = 0;
 static float groundspeed = 0;
 static float heading = 0;
 static float velNorth = 0;
@@ -653,12 +648,9 @@ static bool exchangeDataWithUe(void)
     gpsFakeSet(
         ueToInavGpsFixType(fixType),
         (uint8_t)numSats,
-        /* 显式 (double) 转换：本工程带 -fsingle-precision-constant，裸的浮点字面量
-         * 会被当成 float，与 double 的 latitude 相乘时又退化回单精度 —— 那正是
-         * 原来 64e-7 度量化的来源。1e7 / 100 在 float 里都是精确值，转换无损。 */
-        (int32_t)lround(latitude * (double)10000000.0),
-        (int32_t)lround(longitude * (double)10000000.0),
-        (int32_t)lround(gpsElevation * (double)100.0),
+        (int32_t)roundf(latitude * 10000000.0f),
+        (int32_t)roundf(longitude * 10000000.0f),
+        (int32_t)roundf(gpsElevation * 100.0f),
         (int16_t)roundf(groundspeed * 100.0f),
         (int16_t)roundf(heading * 10.0f),
         (int16_t)roundf(velNorth * 100.0f),
