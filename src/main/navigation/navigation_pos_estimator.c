@@ -527,6 +527,26 @@ static uint32_t calculateCurrentValidityFlags(timeUs_t currentTimeUs)
         newFlags |= EST_Z_VALID;
     }
 
+    /* ---- 临时诊断（1 Hz，验完删）：定位 EST_GPS_XY_VALID 四个条件哪个不成立 ----
+     * sens=SENSOR_GPS, fixst=STATE(GPS_FIX), org=gpsOrigin.valid, age=GPS 距上次更新的 ms,
+     * geph/gves = GPS 解的 eph 与速度, esteph = 估计器水平不确定度。 */
+    {
+        static timeMs_t dbgLastMs = 0;
+        const timeMs_t dbgNowMs = millis();
+        if (dbgNowMs - dbgLastMs >= 1000) {
+            dbgLastMs = dbgNowMs;
+            printf("EST fl=0x%08lx sens=%d fixst=%d org=%d age=%u geph=%.0f gves=%.0f/%.0f esteph=%.0f\n",
+                   (unsigned long)newFlags,
+                   sensors(SENSOR_GPS) ? 1 : 0,
+                   STATE(GPS_FIX) ? 1 : 0,
+                   posControl.gpsOrigin.valid ? 1 : 0,
+                   (unsigned)((currentTimeUs - posEstimator.gps.lastUpdateTime) / 1000),
+                   (double)posEstimator.gps.eph,
+                   (double)posEstimator.gps.vel.x, (double)posEstimator.gps.vel.y,
+                   (double)posEstimator.est.eph);
+        }
+    }
+
     return newFlags;
 }
 

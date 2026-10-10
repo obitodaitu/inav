@@ -359,3 +359,29 @@ bool rtcSetDateTime(dateTime_t *dt)
     rtcTime_t t = dateTimeToRtcTime(dt);
     return rtcSet(&t);
 }
+
+static int64_t simSampleTimeNs = 0;
+static timeUs_t simSampleTimeUs = 0;
+
+void simTimeSetSample(int64_t sampleNs, timeUs_t sampleUs)
+{
+    simSampleTimeNs = sampleNs;
+    simSampleTimeUs = sampleUs;
+}
+
+int64_t simTimeGetSampleNs(void)
+{
+    return simSampleTimeNs;
+}
+
+int64_t simTimeGetNowNs(timeUs_t nowUs)
+{
+    if (simSampleTimeNs == 0) {
+        return 0;
+    }
+
+    /* The delta since the sample is at most one simulator frame, so the
+     * unsigned subtraction is correct across a micros() wrap. */
+    const uint32_t deltaUs = (uint32_t)(nowUs - simSampleTimeUs);
+    return simSampleTimeNs + (int64_t)deltaUs * 1000;
+}

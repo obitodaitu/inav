@@ -381,6 +381,21 @@ void gpsProcessNewSolutionData(bool timeout)
     }
 #endif
 
+    /* ---- 临时诊断（1 Hz，验完删）：GPS_FIX 为何不置位 ----
+     * to=是否超时路径, fix/sats=GPS 解, minsats=门槛, fixst=置位结果,
+     * state=GPS 状态机, agems=距上次"消息"的 ms。 */
+    {
+        static timeMs_t dbgLastMs = 0;
+        const timeMs_t dbgNowMs = millis();
+        if (dbgNowMs - dbgLastMs >= 1000) {
+            dbgLastMs = dbgNowMs;
+            printf("GPSP to=%d fix=%d sats=%d minsats=%d fixst=%d state=%d agems=%u\n",
+                   timeout ? 1 : 0, (int)gpsSol.fixType, (int)gpsSol.numSat,
+                   (int)gpsConfig()->gpsMinSats, STATE(GPS_FIX) ? 1 : 0,
+                   (int)gpsState.state, (unsigned)(millis() - gpsState.lastMessageMs));
+        }
+    }
+
     if (!timeout) {
         // Data came from GPS sensor - set sensor as ready and available (it may still not have GPS fix)
         sensorsSet(SENSOR_GPS);

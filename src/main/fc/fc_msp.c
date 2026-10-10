@@ -80,6 +80,7 @@
 #include "flight/mixer.h"
 #include "flight/pid.h"
 #include "flight/servos.h"
+#include "flight/velocity_control.h"
 #include "flight/ez_tune.h"
 
 #include "config/config_eeprom.h"
@@ -700,6 +701,84 @@ static bool mspFcProcessOutCommand(uint16_t cmdMSP, sbuf_t *dst, mspPostProcessF
         for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
             sbufWriteU32(dst, (int32_t)lrintf(absoluteActualState->pos.v[axis]));
             sbufWriteU16(dst, (int16_t)lrintf(absoluteActualState->vel.v[axis]));
+        }
+        break;
+
+    /*
+     * Timestamped variants: the same payload as the untimed message above,
+     * followed by the simulator sample time as two u32 (low word first). This
+     * is what lets a consumer put an image, a raw IMU sample and the EKF
+     * estimate on one clock instead of three.
+     */
+    case MSP2_INAV_IMU_TIMED:
+        {
+            for (int i = 0; i < 3; i++) {
+                sbufWriteU16(dst, (int16_t)lrintf(acc.accADCf[i] * 512));
+            }
+            for (int i = 0; i < 3; i++) {
+                sbufWriteU16(dst, gyroRateDps(i));
+            }
+            for (int i = 0; i < 3; i++) {
+#ifdef USE_MAG
+                sbufWriteU16(dst, lrintf(mag.magADC[i]));
+#else
+                sbufWriteU16(dst, 0);
+#endif
+            }
+            const int64_t simNs = simTimeGetSampleNs();
+            sbufWriteU32(dst, (uint32_t)(simNs & 0xFFFFFFFF));
+            sbufWriteU32(dst, (uint32_t)((uint64_t)simNs >> 32));
+        }
+        break;
+
+    case MSP2_INAV_ATTITUDE_TIMED:
+        sbufWriteU16(dst, attitude.values.roll);
+        sbufWriteU16(dst, attitude.values.pitch);
+        sbufWriteU16(dst, DECIDEGREES_TO_DEGREES(attitude.values.yaw));
+        {
+            const int64_t simNs = simTimeGetSampleNs();
+            sbufWriteU32(dst, (uint32_t)(simNs & 0xFFFFFFFF));
+            sbufWriteU32(dst, (uint32_t)((uint64_t)simNs >> 32));
+        }
+        break;
+
+    case MSP2_INAV_LOCAL_POSE_TIMED:
+        {
+            sbufWriteU16(dst, attitude.values.roll);
+            sbufWriteU16(dst, attitude.values.pitch);
+            sbufWriteU16(dst, attitude.values.yaw);
+            const navEstimatedPosVel_t *absoluteActualStateTimed = &posControl.actualState.abs;
+            for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
+                sbufWriteU32(dst, (int32_t)lrintf(absoluteActualStateTimed->pos.v[axis]));
+                sbufWriteU16(dst, (int16_t)lrintf(absoluteActualStateTimed->vel.v[axis]));
+            }
+            /* 位姿是 EKF 用**同一帧**仿真采样算出来的，因此打**那一帧采样的时间戳**，
+             * 与 IMU_TIMED / RAW_GPS_TIMED 完全一致（也就是图像侧
+             * fc_sensor_time_unix_ns 所指的那一帧）。
+             * 不能用"发送时刻"（simTimeGetNowNs(micros())）：估计在两次采样之间不变
+             * —— gyro 滤波 / 加速度计更新 / 姿态估计都被仿真帧门控，包落地时跳一步、
+             * 中间保持不变 —— 打发送时刻会把这份状态"依据的是哪一帧"报晚。 */
+            const int64_t simNs = simTimeGetSampleNs();
+            sbufWriteU32(dst, (uint32_t)(simNs & 0xFFFFFFFF));
+            sbufWriteU32(dst, (uint32_t)((uint64_t)simNs >> 32));
+        }
+        break;
+
+    case MSP2_INAV_RAW_GPS_TIMED:
+#ifdef USE_GPS
+        sbufWriteU8(dst, gpsSol.fixType);
+        sbufWriteU8(dst, gpsSol.numSat);
+        sbufWriteU32(dst, gpsSol.llh.lat);
+        sbufWriteU32(dst, gpsSol.llh.lon);
+        sbufWriteU16(dst, gpsSol.llh.alt / 100); // meters
+        sbufWriteU16(dst, gpsSol.groundSpeed);
+        sbufWriteU16(dst, gpsSol.groundCourse);
+        sbufWriteU16(dst, gpsSol.hdop);
+#endif
+        {
+            const int64_t simNs = simTimeGetSampleNs();
+            sbufWriteU32(dst, (uint32_t)(simNs & 0xFFFFFFFF));
+            sbufWriteU32(dst, (uint32_t)((uint64_t)simNs >> 32));
         }
         break;
 
@@ -2021,6 +2100,23 @@ static mspResult_e mspFcProcessInCommand(uint16_t cmdMSP, sbuf_t *src)
         }
         break;
 #endif
+
+    case MSP2_INAV_SET_VELOCITY:
+        // 外部 H 系三轴速度设定值：3 × float32，cm/s，x 前 / y 右 / z 天。
+        if (dataSize == 3 * sizeof(float)) {
+            union {
+                uint32_t u32;
+                float    f;
+            } conv;
+            float velH[3];
+            for (int i = 0; i < 3; i++) {
+                conv.u32 = sbufReadU32(src);
+                velH[i] = conv.f;
+            }
+            velocityControlSetTarget(velH[0], velH[1], velH[2]);
+            return MSP_RESULT_NO_REPLY;
+        } else
+            return MSP_RESULT_ERROR;
 
     case MSP_SET_LOOP_TIME:
         if (sbufReadU16Safe(&tmp_u16, src))

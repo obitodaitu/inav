@@ -52,6 +52,7 @@
 #include "flight/power_limits.h"
 #include "flight/rpm_filter.h"
 #include "flight/servos.h"
+#include "flight/velocity_control.h"
 #include "flight/wind_estimator.h"
 #include "flight/adaptive_filter.h"
 
@@ -356,6 +357,8 @@ void fcTasksInit(void)
     setTaskEnabled(TASK_GYRO, true);
 
     setTaskEnabled(TASK_AUX, true);
+
+    setTaskEnabled(TASK_VELOCITY, true);
 
     setTaskEnabled(TASK_SERIAL, true);
 #if defined(BEEPER) || defined(USE_DSHOT)
@@ -714,6 +717,12 @@ cfTask_t cfTasks[TASK_COUNT] = {
         .taskFunc = taskUpdateAux,
         .desiredPeriod = TASK_PERIOD_HZ(TASK_AUX_RATE_HZ),          // 100Hz @10ms
         .staticPriority = TASK_PRIORITY_HIGH,
+    },
+    [TASK_VELOCITY] = {
+        .taskName = "VELOCITY",
+        .taskFunc = taskVelocityControl,
+        .desiredPeriod = TASK_PERIOD_HZ(200),          // 200Hz @5ms
+        .staticPriority = TASK_PRIORITY_MEDIUM_HIGH,
     },
 #ifdef USE_ADAPTIVE_FILTER
     [TASK_ADAPTIVE_FILTER] = {

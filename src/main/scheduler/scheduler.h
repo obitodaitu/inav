@@ -116,6 +116,7 @@ typedef enum {
     TASK_RPM_FILTER,
 #endif
     TASK_AUX,
+    TASK_VELOCITY,
 #if defined(USE_SMARTPORT_MASTER)
     TASK_SMARTPORT_MASTER,
 #endif
