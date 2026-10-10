@@ -249,7 +249,7 @@ entrypoint 把它改写成 `SIM=ue` + MSP eeprom。**不能透传给固件**：[
 
 > 回退**只在 `--network host` 下成立**。省掉 `--network host` 容器会进 default bridge，网关变成 docker bridge（`172.17.0.1`），那只到 WSL 虚拟机、到不了 Windows 上的 UE。
 
-**防火墙**：容器的仿真链路是往 `SIM_IP` 发包、然后在本机监听 `49000 + N` 收回复，所以 UE 那台机器的**入站** UDP 需要放行 49000 起的这一段（4 架就是 49000-49003/udp）。
+**防火墙**：容器从本机一个**临时源端口**往 `SIM_IP:49000 + N` 发订阅包，UE 把回复发回这个源端口（`ue.c` 不 `bind`，源端口由内核临时分配）。所以需要放行的是 **UE 那台机器的入站 UDP 49000 起这一段**（4 架就是 49000-49003/udp）—— 容器自己并不在 49000 上监听。
 
 ---
 
@@ -359,7 +359,35 @@ python3 msp_rc_client.py --port 5760 --arm --seconds 10 --throttle 0.3
 
 5. **`DATA_ROOT` 会和 `RECEIVER` 打架。** 模板只在 eeprom **不存在**时才播种，所以持久化过的 eeprom 会盖过 `RECEIVER`：机队看着一切正常，但杆量还来自仿真器，MSP 客户端发现飞机毫无反应。启动脚本检测到这种情况会打一行 note；要真生效就删掉那个 `eeprom.bin` 或者用 `RESEED=1`（后者会一并丢弃通过 MSP 改过的配置）。
 
-> 模板是用 `docker/make_msp_eeprom.py` 从 `eeprom.default.bin` 生成的，**只改了三个字节**：`receiver_type` 那个字节，加上重新计算的 CRC16。eeprom 的每条记录都被 CRC 覆盖，校验不过固件会静默回落到出厂默认 —— 正是这套东西一直在避免的那种失败。脚本带 `--verify`，可以拿去核对任何一个 eeprom。
+> 模板是用 `docker/make_msp_eeprom.py` 从 `eeprom.default.bin` 生成的，两个文件**只差 `receiver_type` 一个字段**，加上重新计算的 CRC16。eeprom 的每条记录都被 CRC 覆盖，校验不过固件会静默回落到出厂默认 —— 正是这套东西一直在避免的那种失败。脚本带 `--verify`，可以拿去核对任何一个 eeprom。
+
+### 两个模板都设了 `gyro_main_lpf_hz = 0`
+
+这是绕过一个 **SITL 专有**的发散，不是调机。`gyroFilter()` 全树只有一个调用点（`fc_core.c:955`），在 `SITL_BUILD` 的 `lockMainPID()` 门里面 —— 所以它**每个仿真帧才跑一次**，而它施加的 PT1 系数是按 `getLooptime()` = 500 us 算的（`gyro.c:285`），`pt1FilterUpdateCutoff` 从不纠正存下来的 dT（`filter.c:74`）。于是一个名义 60 Hz 的低通在 60 fps 下变成 ~1.65 Hz、25 fps 下 ~0.69 Hz，在 2.5 Hz 处凭空加进 57–75° 相位滞后。机体没有转动阻尼时，速率环的相位裕度就没了，表现是**左右对称的持续摆动**。设成 0 会让 `initGyroFilter` 走 `nullFilterApply` 分支（`gyro.c:257`）。
+
+真机上 `gyroFilter()` 跑在 2 kHz，所以**不能靠调 PID 增益去补偿它** —— 那等于把机架调成仿真器 bug 的形状。
+
+没有 MSP 命令能改这个（全树无 `MSP_SET_GYRO_CONFIG`），只能进 CLI，而会话期间进 CLI 会锁存 `ARMING_DISABLED_CLI`，只能重启容器。所以它必须烤在模板里。
+
+### 两个模板都设了 `motor_direction_inverted = ON`
+
+这一条**不是**绕过 bug，是**对齐硬件**。UE 插件要自己模拟每个桨的偏航反扭矩，就得和固件混控实际做的事一致，而 INAV 把 `motor_direction_inverted` 折进了这件事（`mixer.c:312`）：
+
+```c
+float signYaw = (float)((rcCommand[YAW] < 0 ? 1 : -1) * (currentMixerConfig.motorDirectionInverted ? 1 : -1));
+```
+
+台架真机 GEPRC F722 是 **ON**，而出厂默认是 **OFF**（`settings.yaml`），所以一份 `MotorYawSign` 不可能同时对上两者。对不上时 INAV 的偏航环把机体往反方向推，**唯一症状就是偏航发散**，没有"部分失效"这种中间态 —— 插件 `InavInterceptorPawn.h` 的注释里写的就是这条。把 SITL 也调成 ON，插件一个值就能同时服务两边，不必为此重编插件。
+
+**改模板后必须重建镜像**（模板是构建期 `COPY` 进 `/opt/inav/` 的，见 `Dockerfile.sitl`），而且**已有 32768 字节的 `/data/eeprom.bin` 不会被重新播种** —— 不带 `RESEED=1` 的话改动会静默地毫无效果。`launch_sitl.sh` 只转发 `RECEIVER` 和 `RESEED`，不转发 `EEPROM_TEMPLATE`，所以宿主机上换模板得手写 `docker run`。
+
+> **别只看容器起没起来。** 重建镜像前先确认烤进去的那份模板是不是你要的：
+>
+> ```bash
+> python3 docker/make_msp_eeprom.py --verify docker/eeprom.msp.bin
+> ```
+>
+> `docker images` 的 `CREATED` 时间比重建命令的成功输出更能说明问题 —— 曾经出现过模板已改好、镜像却还是两周前那份，于是改动**一次都没生效过**。
 
 ---
 
@@ -374,6 +402,7 @@ python3 msp_rc_client.py --port 5760 --arm --seconds 10 --throttle 0.3
 | `[EEPROM] Created` | 播种没生效，跑的是**出厂默认** | `receiver_type = NONE` → 永远解不了锁。见下 |
 | 能连上、能收数据，但一直 `disarmed` / `ARMING_DISABLED_RC_LINK` | 十有八九是上一条：出厂 eeprom 的 `receiver_type = NONE` | 删容器重建（`docker rm -f` 后重跑） |
 | MSP 客户端连上了，飞机毫无反应 | `receiver_type` 还是 `SIM`，dataref 写进没人读的缓冲区 | 确认 `-e RECEIVER=msp` 生效，日志里应是 `from /opt/inav/eeprom.msp.bin` |
+| **能起飞但乱飞、偏航自己转出去** | 模板的 `motor_direction_inverted` 和 UE 插件的 `MotorYawSign` 对不上（见第六节） | 读 `od -A n -j 11088 -N 1 -t u1 /data/eeprom.bin`，应是 `1`；是 `0` 说明镜像没重建或没带 `RESEED=1` |
 | 容器 **Up 但一个端口都没绑** | 固件卡在 `failureMode`：eeprom 能打开、但写不进去（磁盘满、I/O 错） | 这是最难查的一种，因为容器状态是健康的。挂卷的话检查卷的空间 |
 | 容器**退出了** | 大概率是固件打不开 eeprom（SIGSEGV） | `docker inspect -f '{{.State.ExitCode}}'`，139 就是它，对照 5.4 |
 
@@ -392,11 +421,34 @@ docker ps --format '{{.Names}}  {{.Status}}'   # 看当前有哪些
 # 一次性看清楚启动状态
 docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}}' inav-sitl-0
 
-# 确认容器里那份 eeprom 是哪一份
+# 确认容器里那份 eeprom 是哪一份 —— 读字段，不是读整份哈希。
+# receiver_type 在文件偏移 0x0367，SIM=3、MSP=2。
+docker exec inav-sitl-0 od -A n -j 871 -N 1 -t u1 /data/eeprom.bin
+#   default(SIM): 3
+#   msp:          2
+
+# gyro_main_lpf_hz 的低字节在 0x04D3（1235），两个模板都是 0。
+docker exec inav-sitl-0 od -A n -j 1235 -N 2 -t u2 /data/eeprom.bin
+#   0
+
+# motor_direction_inverted 在 0x2B50（11088），两个模板都是 1（ON）。
+# 它是 mixerConfig_t 的首字节，而 mixerConfig_t 领起 mixerProfile_t。
+docker exec inav-sitl-0 od -A n -j 11088 -N 1 -t u1 /data/eeprom.bin
+#   1
+
+# 整份哈希 —— 只对「和模板逐字节相同」有意义，改了模板就会变，别拿它当长期判据。
 docker exec inav-sitl-0 md5sum /data/eeprom.bin
-#   default: 75b151875732554cf220d472cbaf2cf5
-#   msp:     df8eeaa19162de035d50ba10491e2fd7
+#   default: 39f47feb8d7b457d5453e01ca1e69a01
+#   msp:     b501c5498ed7ea29320ed8041f6c1a17
 ```
+
+> 上面三个读数只说明**字节对不对**，不说明**固件会不会收**。CRC 不过的话 `isEEPROMContentValid` 会失败，然后 `resetEEPROM()` 静默回落到出厂默认（`receiver_type = NONE`），容器照样健康地跑。要排除这条，在宿主机上跑一次：
+>
+> ```bash
+> python3 docker/make_msp_eeprom.py --verify docker/eeprom.msp.bin
+> ```
+>
+> 输出里 `checksum ... OK` 才是「固件会真的加载它」。
 
 **eeprom 的持久性**：默认每次都是全新的 —— eeprom 在容器的可写层里，`docker rm` 就没了。这反而是好事，重跑 = 回到已知良好状态。要在容器重建之间保留 CLI 里改过的配置，才需要挂卷（见 `sitl.conf.example` 里的 `DATA_ROOT`）。
 
@@ -470,16 +522,34 @@ INDICES=0,1,2,3          # 起哪几架
 
 ## 十、搬到别的服务器
 
-在构建机上：
+构建分成两步，第二步可以完全离线跑（内网 CI 就是这一步）：
 
 ```bash
-cd /mnt/c/Github/inav
+# 第一步：在有外网的机器上做两个「预装依赖」基础镜像，推到内网 Harbor
+#   builder-base 基于 ubuntu:20.04（glibc 2.31，见下方说明），带整套编译工具链
+#   runtime-base 基于 ubuntu:22.04，只有 ca-certificates + iproute2（约 128MB）
+REG=registry.ghostcloud.cn/integration
+docker build -f Dockerfile.sitl-base --target builder-base -t $REG/inav-sitl-builder-base:20.04 .
+docker build -f Dockerfile.sitl-base --target runtime-base -t $REG/inav-sitl-runtime-base:22.04 .
+docker push $REG/inav-sitl-builder-base:20.04
+docker push $REG/inav-sitl-runtime-base:22.04
+
+# 第二步：内网 CI 直接构建，无需任何 --build-arg，全程不碰 apt/外网
 docker build -f Dockerfile.sitl -t inav-sitl:9.1 .
+
 docker save inav-sitl:9.1 | gzip > inav-sitl-9.1.tar.gz
 sha256sum inav-sitl-9.1.tar.gz > inav-sitl-9.1.tar.gz.sha256
 ```
 
-> 这套 WSL 上 `docker` 已经在组里，不用 `sudo`。如果你的机器要，全程加 `sudo` 即可，脚本那条改 `DOCKER=sudo\ docker`。
+也可以用 `docker/build_sitl_image.sh base|image` 把上面两步各跑一条命令。
+
+> **为什么要拆成两个**：builder 和 runtime 用同一个胖基础镜像的话，runtime 会继承整套工具链，最终镜像会从 135MB 涨到 ~730MB。拆开后 builder-base 只在编译阶段存在，最终镜像仍是 135MB。
+>
+> **builder-base 为什么用 20.04**：某些宿主机的 Docker seccomp 把 `clone3` 拦成 EPERM；Ubuntu 22.04 的 glibc 2.34+ 在 `posix_spawn` 里用 `clone3` 且**不回退**，导致 ninja/make 报 `posix_spawn: Operation not permitted`、CMake 判“编译器 broken”。20.04 的 glibc 2.31 用的是 `clone`，不会被拦，从而**无需改宿主机 seccomp** 也能编译。runtime-base 保持 22.04——glibc 2.31 编出的二进制在 2.35 上向后兼容。
+>
+> **默认就指向内网 Harbor**：`Dockerfile.sitl` 的 `BUILDER_BASE_IMAGE` / `RUNTIME_BASE_IMAGE` 两个 `ARG` 默认已是 `registry.ghostcloud.cn/integration/...`（builder `:20.04`、runtime `:22.04`），所以 CI 里**不加参数**即可。要临时改用干净 `ubuntu:22.04` 构建，用 `--build-arg BUILDER_BASE_IMAGE=ubuntu:22.04 --build-arg RUNTIME_BASE_IMAGE=ubuntu:22.04` 覆盖，Dockerfile 里的依赖守卫会回退到 `apt-get`（需外网）。
+>
+> 这步在 WSL 上 `docker` 已经在组里，不用 `sudo`。如果你的机器要，全程加 `sudo` 即可，脚本那条改 `DOCKER=sudo\ docker`。
 
 传到目标服务器后：
 
