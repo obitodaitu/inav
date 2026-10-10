@@ -752,11 +752,13 @@ static bool mspFcProcessOutCommand(uint16_t cmdMSP, sbuf_t *dst, mspPostProcessF
                 sbufWriteU32(dst, (int32_t)lrintf(absoluteActualStateTimed->pos.v[axis]));
                 sbufWriteU16(dst, (int16_t)lrintf(absoluteActualStateTimed->vel.v[axis]));
             }
-            /* The estimate is built from simulator samples, so stamp it with the
-             * simulator clock at send time: the same mapping the untimed pose
-             * has onto INAV's own clock, only expressed in the clock the images
-             * use. */
-            const int64_t simNs = simTimeGetNowNs(micros());
+            /* 位姿是 EKF 用**同一帧**仿真采样算出来的，因此打**那一帧采样的时间戳**，
+             * 与 IMU_TIMED / RAW_GPS_TIMED 完全一致（也就是图像侧
+             * fc_sensor_time_unix_ns 所指的那一帧）。
+             * 不能用"发送时刻"（simTimeGetNowNs(micros())）：估计在两次采样之间不变
+             * —— gyro 滤波 / 加速度计更新 / 姿态估计都被仿真帧门控，包落地时跳一步、
+             * 中间保持不变 —— 打发送时刻会把这份状态"依据的是哪一帧"报晚。 */
+            const int64_t simNs = simTimeGetSampleNs();
             sbufWriteU32(dst, (uint32_t)(simNs & 0xFFFFFFFF));
             sbufWriteU32(dst, (uint32_t)((uint64_t)simNs >> 32));
         }
