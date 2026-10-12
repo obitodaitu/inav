@@ -177,6 +177,13 @@ void systemInit(void) {
     }
 
     rescheduleTask(TASK_SERIAL, SITL_SERIAL_TASK_US);
+
+    /* Only the simulator backends get the faster GPS task: nothing here applies
+     * to a real receiver, whose data arrives at its own baud-limited rate
+     * regardless of how often it is polled. */
+#ifdef USE_GPS
+    rescheduleTask(TASK_GPS, SITL_GPS_TASK_US);
+#endif
 }
 
 bool parseMapping(char* mapStr)

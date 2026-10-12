@@ -55,11 +55,26 @@ the plugin cannot agree with both. Mismatched, INAV's yaw loop drives the
 airframe the wrong way and the only symptom is that yaw runs away - no partial
 failure. Aligning SITL to ON lets one plugin setting serve both.
 
+--set-gps-provider exists because FEATURE_GPS cannot be turned on by itself.
+gpsInit() (io/gps.c:461) clears the bit outright when the selected provider is
+serial-based and no port carries FUNCTION_GPS, and that is every SITL container:
+the simulator calls gpsFakeSet() directly instead of feeding a receiver. UBLOX
+is serial-based, so the bit is cleared a few lines after the eeprom is loaded
+and no value the eeprom can hold survives to runtime - which is why the shipped
+templates all read GPS off and why turning the bit on changed nothing. FAKE is
+driver-based, so gpsInit() returns before the clear. Setting the bit without
+this is a no-op, and so is this without the bit.
+
+The failure mode is silent in both directions: the sim link reports healthy, the
+aircraft flies, and posEstimator.gps.* is simply never refreshed, because
+gpsUpdate() returns early on the missing feature.
+
 Usage:
     make_msp_eeprom.py --verify eeprom.default.bin
     make_msp_eeprom.py --set-receiver MSP -o eeprom.msp.bin eeprom.default.bin
     make_msp_eeprom.py --set-gyro-lpf 0 -o out.bin eeprom.msp.bin
     make_msp_eeprom.py --set-motor-direction-inverted ON -o out.bin in.bin
+    make_msp_eeprom.py --set-gps-provider FAKE --set-feature GPS=ON -o out.bin in.bin
 """
 
 import argparse
@@ -76,6 +91,15 @@ PG_GYRO_CONFIG_VERSION = 12
 PG_MIXER_PROFILE = 20
 # From PG_REGISTER_ARRAY_WITH_RESET_FN(mixerProfile_t, ...), mixer_profile.c:40.
 PG_MIXER_PROFILE_VERSION = 1
+# PG_FEATURE_CONFIG is 19 (parameter_group_ids.h:38); the version is the last
+# argument of PG_REGISTER_WITH_RESET_TEMPLATE(featureConfig_t, featureConfig, ...).
+PG_FEATURE_CONFIG = 19
+PG_FEATURE_CONFIG_VERSION = 0
+# featureConfig_t is a single uint32_t (fc/config.h). That makes this the one
+# record with nothing inside its payload to check against a factory value, so
+# the size does the work instead: 6 bytes of header plus exactly 4.
+FEATURE_CONFIG_PAYLOAD_SIZE = 4
+
 CR_CLASSIFICATION_MASK = 0x3
 CR_CLASSIFICATION_SYSTEM = 0
 
@@ -117,6 +141,40 @@ QUAD_MOTORS = 4
 MOTOR_DIRECTION_INVERTED = {"OFF": 0, "ON": 1}
 MOTOR_DIRECTION_INVERTED_NAME = {v: k for k, v in MOTOR_DIRECTION_INVERTED.items()}
 
+# fc/cli.c:161 featureNames[] -- the table is indexed by bit number, so an entry's
+# position *is* its shift, which is why this maps names to bits rather than to
+# masks. The unused slots ("") are left out rather than kept as placeholders so a
+# typo fails as an unknown name instead of clearing some other feature's bit.
+FEATURE_BIT = {
+    "THR_VBAT_COMP": 0, "VBAT": 1, "TX_PROF_SEL": 2, "BAT_PROF_AUTOSWITCH": 3,
+    "GEOZONE": 4, "SOFTSERIAL": 6, "GPS": 7, "RPM_FILTERS": 8,
+    "TELEMETRY": 10, "CURRENT_METER": 11, "REVERSIBLE_MOTORS": 12, "RSSI_ADC": 15,
+    "LED_STRIP": 16, "DASHBOARD": 17, "BLACKBOX": 19, "TRANSPONDER": 21,
+    "AIRMODE": 22, "SUPEREXPO": 23, "VTX": 24, "PWM_OUTPUT_ENABLE": 28,
+    "OSD": 29, "FW_LAUNCH": 30, "FW_AUTOTRIM": 31,
+}
+FEATURE_ON_OFF = {"OFF": 0, "ON": 1}
+
+# PG_GPS_CONFIG is 30, from PG_REGISTER_WITH_RESET_TEMPLATE(gpsConfig_t,
+# gpsConfig, PG_GPS_CONFIG, 5) at io/gps.c:120.
+PG_GPS_CONFIG = 30
+PG_GPS_CONFIG_VERSION = 5
+# gpsConfig_t's five leading members are all enums (io/gps.h:94), and every one
+# of them is an int in this ABI, so provider sits in the first four payload
+# bytes with nothing packing ahead of it.
+GPS_PROVIDER_OFFSET = 0
+GPS_PROVIDER = {"UBLOX": 0, "MSP": 1, "FAKE": 2}
+GPS_PROVIDER_NAME = {v: k for k, v in GPS_PROVIDER.items()}
+
+# The four enum members behind provider, with the ranges their definitions allow
+# (io/gps.h:42-90). Reading all four of them in range is what makes a 4-byte
+# enum stride believable; if the ABI ever packed them narrower, provider would
+# still read 0 and every check here would fail, which is the failure worth
+# having.
+SBAS_MODE_MAX = 6
+DYN_MODEL_MAX = 6
+GPS_PROVIDER_MAX = len(GPS_PROVIDER) - 1
+
 
 def crc16_ccitt(crc, byte):
     """One byte of CRC16-CCITT, matching common/crc.c:crc16_ccitt.
@@ -141,6 +199,10 @@ def crc16(data, crc=0):
 
 def u16(data, offset):
     return data[offset] | (data[offset + 1] << 8)
+
+
+def u32(data, offset):
+    return struct.unpack_from("<I", data, offset)[0]
 
 
 def i16(data, offset):
@@ -239,6 +301,18 @@ def find_system(data, pgn, version):
     return offset, size, payload
 
 
+def feature_payload(data):
+    """The validated featureConfig_t payload and its file offset."""
+    offset, size, payload = find_system(data, PG_FEATURE_CONFIG, PG_FEATURE_CONFIG_VERSION)
+
+    if size != 6 + FEATURE_CONFIG_PAYLOAD_SIZE:
+        raise ValueError(
+            "PG_FEATURE_CONFIG at 0x%04X is %d bytes, expected %d - featureConfig_t "
+            "is not a single uint32_t in this build, so its bits cannot be trusted"
+            % (offset, size, 6 + FEATURE_CONFIG_PAYLOAD_SIZE))
+    return offset, payload
+
+
 def rx_payload(data):
     """The validated rxConfig_t payload and its file offset."""
     offset, _, payload = find_system(data, PG_RX_CONFIG, PG_RX_CONFIG_VERSION)
@@ -305,6 +379,34 @@ def mixer_payload(data):
     return offset, payload
 
 
+def gps_payload(data):
+    """The validated gpsConfig_t payload and its file offset.
+
+    provider is the field that matters, and the four enums behind it are what
+    make it believable: sbasMode, autoConfig, autoBaud and dynModel are each
+    constrained by their own definitions, so a stride that was not four bytes
+    would push at least one of them out of range. Unlike the structs checked
+    above there is no factory value to compare against, because autoConfig and
+    autoBaud are legitimately 0 or 1 and both ends are in range.
+    """
+    offset, _, payload = find_system(data, PG_GPS_CONFIG, PG_GPS_CONFIG_VERSION)
+
+    provider = u32(payload, GPS_PROVIDER_OFFSET)
+    sbas = u32(payload, 4)
+    auto_config = u32(payload, 8)
+    auto_baud = u32(payload, 12)
+    dyn_model = u32(payload, 16)
+    if (provider > GPS_PROVIDER_MAX or sbas > SBAS_MODE_MAX
+            or auto_config > 1 or auto_baud > 1 or dyn_model > DYN_MODEL_MAX):
+        raise ValueError(
+            "PG_GPS_CONFIG at 0x%04X reads provider=%d sbasMode=%d autoConfig=%d "
+            "autoBaud=%d dynModel=%d - at least one is outside its own enum, so "
+            "gpsProvider_e is not a four-byte member here and the provider offset "
+            "cannot be trusted"
+            % (offset, provider, sbas, auto_config, auto_baud, dyn_model))
+    return offset, payload
+
+
 def describe(data):
     """Print the layout and the two validated fields, or raise explaining why not.
 
@@ -362,6 +464,23 @@ def describe(data):
           % tuple([payload[1], i16(payload, 4)]
                   + list(struct.unpack_from("<4f", payload, MIXER_CONFIG_SIZE))
                   + [MIXER_CONFIG_SIZE]))
+
+    offset, payload = gps_payload(data)
+    provider = u32(payload, GPS_PROVIDER_OFFSET)
+    print("gps_provider  : %s (%d) at file offset 0x%04X"
+          % (GPS_PROVIDER_NAME.get(provider, "?"), provider,
+             offset + 6 + GPS_PROVIDER_OFFSET))
+
+    offset, payload = feature_payload(data)
+    mask = u32(payload, 0)
+    enabled = ", ".join(name for name, bit
+                        in sorted(FEATURE_BIT.items(), key=lambda kv: kv[1])
+                        if mask & (1 << bit))
+    print("features      : %s (mask 0x%08X at file offset 0x%04X)"
+          % (enabled or "(none)", mask, offset + 6))
+    print("note          : this is the eeprom's own answer and it overrides "
+          "DEFAULT_FEATURES,\n"
+          "                so a feature target.h asks for can still be off here")
 
 
 def refoot(out):
@@ -453,11 +572,79 @@ def set_motor_direction_inverted(data, value):
     return refoot(out)
 
 
+def set_gps_provider(data, value):
+    """Return data with gps_provider set and the checksum recomputed.
+
+    This is the half of the GPS fix that has to live here rather than in the
+    feature mask; the module docstring has the whole chain. Setting one without
+    the other is a no-op at runtime either way.
+    """
+    require_valid(data)
+    offset, payload = gps_payload(data)
+    current = u32(payload, GPS_PROVIDER_OFFSET)
+
+    if current == value:
+        print("\ngps_provider is already %s; nothing to change."
+              % GPS_PROVIDER_NAME.get(value, value))
+        return data
+
+    out = bytearray(data)
+    struct.pack_into("<I", out, offset + 6 + GPS_PROVIDER_OFFSET, value)
+
+    print("\ngps_provider : %s (%d) -> %s (%d)"
+          % (GPS_PROVIDER_NAME.get(current, "?"), current,
+             GPS_PROVIDER_NAME.get(value, "?"), value))
+    return refoot(out)
+
+
+def set_features(data, wanted):
+    """Return data with the named features on or off, and the checksum recomputed.
+
+    Only the named bits move. The rest of the mask is left byte-for-byte as it
+    was found, because this template also carries settings the image depends on
+    -- turning GPS on the way the CLI would, by starting from factory defaults
+    and re-enabling the interesting features, is how a SITL image ends up with
+    receiver_type reset and no way to arm.
+
+    A feature whose bit is already in the asked-for state is reported as such and
+    left alone, which makes the setter safe to re-run.
+    """
+    require_valid(data)
+    offset, payload = feature_payload(data)
+    before = u32(payload, 0)
+    mask = before
+
+    for name in wanted:
+        if name not in FEATURE_BIT:
+            raise ValueError("unknown feature %r (known: %s)"
+                             % (name, ", ".join(sorted(FEATURE_BIT))))
+
+    changes = []
+    for name, value in wanted.items():
+        bit = 1 << FEATURE_BIT[name]
+        updated = (mask | bit) if value else (mask & ~bit)
+        if updated != mask:
+            changes.append("%s %s" % (name, "ON" if value else "OFF"))
+        mask = updated
+
+    if not changes:
+        print("\nfeatures are already as asked; nothing to change.")
+        return data
+
+    out = bytearray(data)
+    struct.pack_into("<I", out, offset + 6, mask)
+
+    print("\nfeatures      : %s" % ", ".join(changes))
+    print("feature mask  : 0x%08X -> 0x%08X at file offset 0x%04X"
+          % (before, mask, offset + 6))
+    return refoot(out)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Inspect an INAV SITL eeprom, and optionally change its "
-                    "receiver type, its gyro main LPF cutoff, or its motor "
-                    "direction inversion.")
+                    "receiver type, its GPS provider, its gyro main LPF cutoff, "
+                    "its motor direction inversion, or its feature bits.")
     ap.add_argument("source", help="eeprom to read")
     ap.add_argument("--verify", action="store_true",
                     help="parse and check the checksum, change nothing")
@@ -470,19 +657,39 @@ def main():
                     choices=sorted(MOTOR_DIRECTION_INVERTED),
                     help="motor_direction_inverted to write; ON matches the real "
                          "GEPRC F722, which the UE plugin is set up for")
+    ap.add_argument("--set-gps-provider", choices=sorted(GPS_PROVIDER),
+                    help="gps_provider to write; FAKE is the only one that lets "
+                         "FEATURE_GPS survive gpsInit() in SITL, so it is the "
+                         "only one that turns the velocity reference on")
+    ap.add_argument("--set-feature", action="append", metavar="NAME=ON|OFF",
+                    help="feature bit to write, e.g. GPS=ON; repeatable, and "
+                         "only the named bits move (known: %s)"
+                         % ", ".join(sorted(FEATURE_BIT)))
     ap.add_argument("-o", "--output",
                     help="where to write the result (required with a setter)")
     args = ap.parse_args()
 
-    setters = (args.set_receiver is not None or args.set_gyro_lpf is not None
-               or args.set_motor_direction_inverted is not None)
+    setters = (args.set_receiver is not None or args.set_gps_provider is not None
+               or args.set_gyro_lpf is not None
+               or args.set_motor_direction_inverted is not None
+               or args.set_feature)
     if not args.verify and not setters:
-        ap.error("give --verify, --set-receiver, --set-gyro-lpf or "
-                 "--set-motor-direction-inverted")
+        ap.error("give --verify, --set-receiver, --set-gps-provider, "
+                 "--set-gyro-lpf, --set-motor-direction-inverted or --set-feature")
     if setters and not args.output:
         ap.error("a setter needs -o")
     if args.set_gyro_lpf is not None and not 0 <= args.set_gyro_lpf <= 0xFFFF:
         ap.error("--set-gyro-lpf must be 0..65535")
+
+    features = {}
+    for spec in args.set_feature or ():
+        name, sep, value = spec.partition("=")
+        name, value = name.strip().upper(), value.strip().upper()
+        if not sep or name not in FEATURE_BIT:
+            ap.error("--set-feature takes a known NAME=ON|OFF, got %r" % spec)
+        if value not in FEATURE_ON_OFF:
+            ap.error("--set-feature value must be ON or OFF, got %r" % value)
+        features[name] = FEATURE_ON_OFF[value]
 
     try:
         with open(args.source, "rb") as f:
@@ -503,11 +710,15 @@ def main():
         out = data
         if args.set_receiver is not None:
             out = set_receiver(out, RX_TYPE[args.set_receiver])
+        if args.set_gps_provider is not None:
+            out = set_gps_provider(out, GPS_PROVIDER[args.set_gps_provider])
         if args.set_gyro_lpf is not None:
             out = set_gyro_lpf(out, args.set_gyro_lpf)
         if args.set_motor_direction_inverted is not None:
             out = set_motor_direction_inverted(
                 out, MOTOR_DIRECTION_INVERTED[args.set_motor_direction_inverted])
+        if features:
+            out = set_features(out, features)
 
         with open(args.output, "wb") as f:
             f.write(out)

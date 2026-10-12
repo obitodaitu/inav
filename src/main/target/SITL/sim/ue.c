@@ -88,6 +88,7 @@
 #define UE_PROTOCOL_VERSION     2
 #define UE_HANDSHAKE_TIMEOUT_MS 10000
 #define UE_RECV_TIMEOUT_MS      500
+#define UE_RESUBSCRIBE_MS       500
 #define UE_SIM_LOST_MS          1000
 #define UE_SUBSCRIBE_HZ         100
 #define UE_RC_CHANNEL_COUNT     8
@@ -718,6 +719,7 @@ static void* listenWorker(void* arg)
                 registerAllDrefs(UE_SUBSCRIBE_HZ);
 
                 const timeMs_t deadline = millis() + UE_HANDSHAKE_TIMEOUT_MS;
+                timeMs_t lastSubscribeMs = millis();
                 float version = 0;
                 bool connected = false;
 
@@ -730,9 +732,21 @@ static void* listenWorker(void* arg)
                                 UE_HANDSHAKE_TIMEOUT_MS);
                         connectionState = UE_DISCONNECTED;
                         break;
-                    } else {
-                        // The simulator may have been started after us
+                    } else if (millis() - lastSubscribeMs >= UE_RESUBSCRIBE_MS) {
+                        // The simulator may have been started after us.
+                        //
+                        // Rate limited, and that is not a nicety. receiveSingleDref()
+                        // only blocks for UE_RECV_TIMEOUT_MS when there is nothing to
+                        // read, and a peer that is already answering - which is exactly
+                        // what a simulator on the wrong protocol version looks like -
+                        // makes it return immediately. Ungated, this branch then runs at
+                        // the peer's reply rate, sending UE_DREF_COUNT subscriptions per
+                        // pass, each of which draws another reply: a feedback loop. That
+                        // measured ~300k packets/s for the full handshake timeout, and a
+                        // 1.4 GB capture. A round every UE_RESUBSCRIBE_MS covers the same
+                        // 10 s window for 88 packets/s.
                         registerAllDrefs(UE_SUBSCRIBE_HZ);
+                        lastSubscribeMs = millis();
                     }
                 }
 

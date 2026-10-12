@@ -242,9 +242,13 @@ void onNewGPSData(void)
 
                 /* Use VELNED provided by GPS if available, calculate from coordinates otherwise */
                 float gpsScaleLonDown = constrainf(cos_approx((ABS(gpsSol.llh.lat) / 10000000.0f) * 0.0174532925f), 0.01f, 1.0f);
-                /* SITL (X-Plane DataRef) passes zero velNED — use coordinate-difference velocity instead.
-                 * MSP HITL explicitly injects real velNED via readMspSimulatorValues, so let it through. */
-                if (!ARMING_FLAG(SIMULATOR_MODE_SITL) && gpsSol.flags.validVelNE) {
+                /* Which simulators inject a usable velNED: MSP HITL via readMspSimulatorValues, and the
+                 * UE SITL backend, which forwards the aircraft's real velocity through ue.c -> gpsFakeSet().
+                 * Only the legacy X-Plane backend passes zeros, and SIM=ue is what actually runs here, so
+                 * trusting validVelNE is correct. The coordinate difference is the fallback, and it is a
+                 * poor one at the 200 Hz TASK_GPS these builds run: 5 ms of travel gets resolved against
+                 * 1e-7 deg (~1.1 cm) of position quantisation. */
+                if (gpsSol.flags.validVelNE) {
                     posEstimator.gps.vel.x = gpsSol.velNED[X];
                     posEstimator.gps.vel.y = gpsSol.velNED[Y];
                 }

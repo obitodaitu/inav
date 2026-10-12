@@ -56,6 +56,13 @@
 #define SERIAL_PORT_COUNT 8
 #define SITL_SERIAL_TASK_US (500)
 
+/* The UE backend hands over one GPS sample per simulator frame, so TASK_GPS is
+ * the rate at which the position estimator's velocity reference is refreshed --
+ * not the 5-10 Hz receiver the 50 Hz default was sized for. At 200 Hz the task
+ * sees every frame the simulator publishes. It is rescheduled rather than
+ * changed in fc_tasks.c so real GPS hardware keeps the 50 Hz default. */
+#define SITL_GPS_TASK_US (5000)
+
 #define DEFAULT_RX_FEATURE      FEATURE_RX_MSP
 #define DEFAULT_FEATURES        (FEATURE_GPS |  FEATURE_OSD | FEATURE_CURRENT_METER | FEATURE_VBAT)
 

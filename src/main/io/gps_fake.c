@@ -40,6 +40,14 @@
 #include "io/gps.h"
 #include "io/gps_private.h"
 
+/* Set by gpsFakeSet() on the simulator thread, consumed by gpsFakeHandle() on
+ * the scheduler thread. Without this the handler announces a new solution on
+ * every TASK_GPS tick, so once the task runs faster than the simulator
+ * publishes, the estimator is handed the same position repeatedly and the
+ * coordinate-difference fallback turns the duplicates into zero-delta spikes.
+ * Same pattern as rx/sim.c. */
+static bool hasNewData = false;
+
 void gpsFakeRestart(void)
 {
     // NOP
@@ -47,6 +55,11 @@ void gpsFakeRestart(void)
 
 void gpsFakeHandle(void)
 {
+    if (!hasNewData) {
+        return;
+    }
+
+    hasNewData = false;
     gpsProcessNewSolutionData(false);
 }
 
@@ -97,6 +110,7 @@ void gpsFakeSet(
     }
     
     gpsProcessNewDriverData();
+    hasNewData = true;
 }
    
 #endif
