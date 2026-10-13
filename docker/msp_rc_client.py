@@ -143,9 +143,10 @@ STATUS_ARMING_FLAGS_OFFSET = 9
 
 MSP_STATUS = 101
 # MSP_ALTITUDE is the estimated Z position in cm, then the vertical velocity in
-# cm/s, then the raw barometric altitude (fc_msp.c:685-693). Only the first word
-# is used here: the question it answers is whether the airframe is off the
-# ground, and for that the sign of an estimated position is enough.
+# cm/s, then the raw barometric altitude (fc_msp.c:685-693). read_altitude_cm
+# uses only the first word -- "is it off the ground" needs no more than the sign
+# of an estimated position -- but read_altitude_vel_cm keeps the second one,
+# which is the estimator's own velocity and does not have to be differenced.
 MSP_ALTITUDE = 109
 MSP2_PID = 0x2030
 MSP2_SET_PID = 0x2031
@@ -327,6 +328,14 @@ ARMING_DISABLED_ALL_FLAGS = sum(1 << bit for bit in ARMING_DISABLE_BITS)
 # on; RC_LINK is the flag that is set when the RC frames are going nowhere.
 ARMING_DISABLED_ARM_SWITCH = 1 << 14
 ARMING_DISABLED_RC_LINK = 1 << 18
+
+# Named because it is the flag a stale sim link wears. The firmware raises it
+# when a sensor it needs is not healthy, and a ue.c that subscribed to nothing
+# feeds it no gyro at all -- so this, not RC_LINK and not ARM_SWITCH, is what a
+# stranded container looks like from the client's side. SIMULATOR_MODE_SITL
+# stays set throughout, which is what makes it worth its own name: the
+# "is there a simulator link" test passes while the link carries nothing.
+ARMING_DISABLED_HARDWARE_FAILURE = 1 << 15
 
 
 def describe_flags(flags):
@@ -1109,6 +1118,26 @@ def read_altitude_cm(link, timeout=0.2):
     if cmd != MSP_ALTITUDE or err or len(payload) < 4:
         return None
     return struct.unpack_from("<i", payload, 0)[0]
+
+
+def read_altitude_vel_cm(link, timeout=0.2):
+    """(estimated altitude cm, estimated vertical velocity cm/s), or None.
+
+    The same reply as read_altitude_cm with its second word kept:
+    lrintf(getEstimatedActualVelocity(Z)) (fc_msp.c:688), written through
+    sbufWriteU16 (streambuf.h:34, uint16_t) so a descent arrives as two's
+    complement and has to be unpacked signed.
+
+    Worth reading rather than differentiating the position. Field 1 is a
+    position *estimate*: whole centimetres, whatever latency the estimator and
+    the round trip added, and no timestamp saying which instant it describes.
+    Its derivative therefore mixes estimator noise with this client's read
+    jitter, and on a steady climb that comes out as a stutter that is not there.
+    """
+    cmd, payload, link.buf, err = link.request(MSP_ALTITUDE, timeout=timeout)
+    if cmd != MSP_ALTITUDE or err or len(payload) < 6:
+        return None
+    return struct.unpack_from("<ih", payload, 0)
 
 
 def read_pid_table(link, timeout=1.0):

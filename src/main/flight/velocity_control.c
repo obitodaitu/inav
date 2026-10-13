@@ -53,6 +53,10 @@
 
 #define VEL_TIMEOUT_US              500000      // 速度指令超时：500ms 无更新则解除接管
 #define VEL_FEEDBACK_LPF_HZ         15.0f       // 反馈速度环内低通截止频率
+/* 反算（back-calculation）抗积分饱和的时间常数，单位 s。
+ * 输出被钳制时按 (out - unsat)/Tt 把积分器往回拉；越大越温和。
+ * 取 1 s，略大于本环的主导滞后（竖直速度反馈滞后实测 ~0.35 s）。三个轴共用。 */
+#define VEL_ANTIWINDUP_TT_S         1.0f
 /* 水平加速度输出上限（cm/s²）。它直接决定**巡航倾角**：φ_des = atan(aFwd/(g+a_v))，
  * 而本机"推力方向 = 加速度方向"（docs/ue_operations.md §6.2），所以倾角越大推力越接近水平、
  * 速度越快。原来取 350（0.36g≈20°）时，20 m/s 巡航配平只需 ~11°（0.19g），
@@ -64,7 +68,23 @@
  * 但"保持高度"的物理上限就在 60° 附近。 */
 #define VEL_MAX_HORIZ_ACC_CMSS      3500.0f
 #define VEL_MAX_HORIZ_VEL_CMS       12000.0f    // 水平速度目标上限（>90m/s，留余量）
-#define VEL_MAX_VERT_VEL_CMS        3000.0f     // 垂直速度目标上限（±30m/s）
+/* **世界竖直**速度目标上限（cm/s），限的是 vel.targetUp（:258），对照的反馈是
+ * :351 的 fbUpRaw = est.vel.v[Z] —— 地固 NEU 向上。
+ *
+ * 2026-10-13 复核：线框是**劈开**的，别把两半混成一件事 ——
+ *   姿态 / 陀螺 / 加速度：走 WireRotation = Rotation * Q，是"推力轴读作 up"的**机体系**
+ *                         （InavInterceptorPawn.cpp:2996-2999）。这一半 wire Z 确实 = 机头。
+ *   **速度**：不走那套旋转。InavInterceptorPawn.cpp:3121-3126 只做 East-South-Up -> NED
+ *           的换轴（VelDown = -VelocityMS.Z），所以 GPS/速度这一半是**地固**的，
+ *           est.vel.v[Z] 就是地垂向上（navigation_pos_estimator.c:261 // NEU）。
+ * 本文件 :278/:342 那句"线框 +Z = 机体 +X = 推力轴"说的是**前一秒那半**（rMat/姿态），
+ * 引用来源 docs/ue_operations.md §4.2 **在仓库里并不存在**，别当依据。
+ *
+ * 所以这一条限的是**地垂速度分量**，不是"沿机头的速度" —— 沿机头的**速度**上限在
+ * 水平通道 VEL_MAX_HORIZ_VEL_CMS（12000 = 432 km/h，早就够 320）。
+ * 那为什么还要从 3000 放宽：俯冲 320 km/h 时机速矢量压到 ~84°，**其竖直分量 ≈ 88 m/s**，
+ * ±30 m/s 会先把这条指令砍掉（爬升方向它是无用的 no-op —— 22 N 推力根本爬不到 100 m/s）。 */
+#define VEL_MAX_VERT_VEL_CMS        10000.0f
 
 /* 绕推力轴的滚转保持（见文件末尾的说明）。增益单位 dps/deg。 */
 #define VEL_ROLL_HOLD_KP            3.0f
@@ -128,7 +148,11 @@ typedef struct {
     float kd;
     float integrator;
     float prevError;
-    float iLimit;       // 积分项限幅（输出单位）
+    float iLimit;       // 积分项**正向**限幅（输出单位）
+    /* 积分项**负向**限幅。<= 0 表示与 iLimit 对称 —— 水平两环不写这一项，行为不变。
+     * 垂速环必须非对称：正向要跟得上 30 m/s² / 320 km/h 的权限，负向保持窄，
+     * 否则积分器会卷绕到很负、油门长时间贴在 outMin 上（见 taskVelocityControl 的故障链）。 */
+    float iLimitNeg;
     float dLimit;       // 微分项变化率限幅
     float outMin;
     float outMax;
@@ -141,12 +165,6 @@ static float velPidApply(velPid_t *p, float target, float measurement, float dt)
     // P
     const float pTerm = p->kp * error;
 
-    // I（含抗积分饱和限幅）
-    if (p->ki > 0.0f && dt > 0.0f) {
-        p->integrator += p->ki * error * dt;
-        p->integrator = constrainf(p->integrator, -p->iLimit, p->iLimit);
-    }
-
     // D（默认 kd=0；对误差微分并限变化率，抑制噪声）
     float dTerm = 0.0f;
     if (p->kd != 0.0f && dt > 0.0f) {
@@ -156,7 +174,30 @@ static float velPidApply(velPid_t *p, float target, float measurement, float dt)
     }
     p->prevError = error;
 
-    return constrainf(pTerm + p->integrator + dTerm, p->outMin, p->outMax);
+    /* 先留**未限幅**的三项之和，再钳成实际输出 —— 两个都要，因为下面反算要知道被削掉多少。 */
+    const float unsat = pTerm + p->integrator + dTerm;
+    const float out   = constrainf(unsat, p->outMin, p->outMax);
+
+    /* I —— 反算（back-calculation）抗积分饱和。
+     *
+     * 2026-10-13 加。此前只有幅值钳制，注释写的"抗积分饱和限幅"名不副实：
+     * 输出顶在 outMax 时积分器照涨不误。40 m/s 垂直阶跃实测，油门在 2000 上顶了
+     * 约 1.2 s，积分器被充到 ~378 µs，而全程真正需要的稳态权限只有 ~221 µs ——
+     * 多出的 ~150 µs 就是超调（实测峰值 46.0 m/s = +15.0%），之后按 ki·|error|
+     * 慢慢泄，所以还拖着十几秒的长尾。改正后按模型峰值 -1.7%（不过冲），
+     * 且到 30 m/s 的加速时间不变（0.81 s）—— 饱和期间本来就该是满油门。
+     *
+     * Tt 越大越温和，见 VEL_ANTIWINDUP_TT_S。**iLimit 保持 700 不动**：
+     * VEL_MAX_VERT_VEL_CMS=10000 时竖直环确实要吃到接近 700 µs，
+     * 靠压低 iLimit 治超调会在高速爬升/俯冲时重新引入掉速。 */
+    if (p->ki > 0.0f && dt > 0.0f) {
+        p->integrator += p->ki * error * dt;
+        p->integrator += (out - unsat) * dt / VEL_ANTIWINDUP_TT_S;
+        const float limNeg = (p->iLimitNeg > 0.0f) ? p->iLimitNeg : p->iLimit;
+        p->integrator = constrainf(p->integrator, -limNeg, p->iLimit);
+    }
+
+    return out;
 }
 
 /* ---------------- 模块状态 ---------------- */
@@ -428,13 +469,33 @@ void taskVelocityControl(timeUs_t currentTimeUs)
     //   -30 µs                         → ~0.8g   = 最多 2 m/s² 下落
     //   +22 µs                         → 1.03g   = 实测稳态 5 m/s 爬升只需要这么多
     //   +150 µs                        → ~2.2g   = 爬升权限绰绰有余
+    //
+    // 2026-10-13：向上权限 250 是为上面那个 5 m/s 时代配的，现在整机指标是
+    // "沿机头 30 m/s² / 320 km/h"。
+    //
+    // 为什么这条**确实**是"沿机头"的权限（虽然它的反馈是地垂速度，见 :348-354 和
+    // :67 的说明）：本机 throttle = 总推力，而推力沿机头（ThrustAxisBody = body +X，
+    // InavInterceptorPawn.cpp:972-979）⇒ pidUp 的输出限幅限的就是**沿机头的推力**。
+    // 悬停态两者重合（机头朝天），这也是原来那条注释看着成立的原因。
+    // 沿机头 30 m/s²（悬停态）要 ~1863 µs = hover + 563，250 只给到 1550 ⇒
+    // 上限 (T(1550)-W)/m = (9.53-4.41)/0.45 = 11.4 m/s²，与实测**逐位吻合**。
+    // 故正向放到 700（= maxT - hover，即全油门行程），负向**一个数都不动**。
+    // 上面那条故障链管的是向下（收油 → 推力塌），与正向权限无关。
     // 实测故障链：爬到 29 m 后水平指令介入，垂速指令由 5 m/s 掉到 0.5 m/s，
     // 垂速环猛收油门 → 推力塌到 1/4 → 3.6 s 掉 35 m 撞地、之后一直贴地滑行
     // （adapter 日志 alt=463/22.9 → 440/-5.2 → 440/0.1 gs=5.3 就是这段）。
     // 所以向下只给 ~0.8g，向上给满；积分限幅同样收窄避免下侧卷绕。
-    vel.pidUp.outMin = fmaxf(idle - hover, -30.0f);
-    vel.pidUp.outMax = fminf(maxT - hover, 250.0f);
-    vel.pidUp.iLimit = 60.0f;
+    vel.pidUp.outMin = fmaxf(idle - hover, -30.0f);   // 未动 —— 故障链由它挡
+    vel.pidUp.outMax = fminf(maxT - hover, 700.0f);   // 250 → 700（= maxT - hover）
+    /* 积分限幅**非对称**：正向必须托得住"稳态所需的油门偏置"。
+     * 320 km/h 的配平油门 ~1857 µs ⇒ 偏置 ~557 µs。而稳态下速度误差 ≈ 0、
+     * 修正量几乎全由积分器出 ⇒ 积分限幅还在 60 的话，环路只能拿速度静差去补：
+     * (557-60)/kp = (557-60)/0.4 = 1242 cm/s ≈ 12.4 m/s 的掉坑 ——
+     * 这正是 --vz 4000 只飞到 28 m/s 的机制（当时 125 µs 的修正里 60 来自积分器、
+     * 65 来自 P，误差 163.5 cm/s 全被 iLimit=60 钉死）。
+     * 给到 700 就没有这个坑。负向 60 保持原样，理由同 outMin。 */
+    vel.pidUp.iLimit = 700.0f;
+    vel.pidUp.iLimitNeg = 60.0f;
 
     const float thrCorrection = velPidApply(&vel.pidUp, vel.targetUp, fbUp, dt);
     const float throttle = constrainf(hover + thrCorrection, idle, maxT);
